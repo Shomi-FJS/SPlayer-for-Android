@@ -67,7 +67,7 @@
             <div
               v-else
               :id="`lrc-${index}`"
-              :class="getLyricLineClass(item, index)"
+              :class="[getLyricLineClass(item, index), { 'visible-inactive': isVisibleInactiveLine(index) }]"
               :style="getLyricLineStyle(item, index)"
               @click="jumpSeek(item.data.startTime)"
             >
@@ -154,6 +154,9 @@ const settingStore = useSettingStore();
 const player = usePlayerController();
 
 const lyricScrollContainer = ref<HTMLElement | null>(null);
+/** IntersectionObserver 追踪的可见歌词行索引集合 */
+const visibleLineIndices = reactive(new Set<number>());
+let visibleLineObserver: IntersectionObserver | null = null;
 
 const effectiveLyricsScrollOffset = computed(() =>
   isCapacitorAndroid
@@ -230,33 +233,50 @@ const activeLineIndices = computed<number[]>(() => {
   const lyrics = processedLyrics.value;
   if (!lyrics || lyrics.length === 0) return [];
   const currentSeek = props.currentTime;
-  const activeCandidates: number[] = [];
 
-  for (let i = 0; i < lyrics.length; i++) {
-    const item = lyrics[i];
-    let start = 0;
-    let end = Infinity;
-    if (item.type === "lyric") {
-      start = item.data.startTime || 0;
-      end = item.data.endTime ?? Infinity;
+  // 二分查找：找到最后一个 startTime <= currentSeek 的歌词行
+  let lo = 0;
+  let hi = lyrics.length - 1;
+  let candidate = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >>> 1;
+    const start = lyrics[mid].type === "lyric" ? lyrics[mid].data.startTime : lyrics[mid].startTime;
+    if ((start || 0) <= currentSeek) {
+      candidate = mid;
+      lo = mid + 1;
     } else {
-      start = item.startTime;
-      end = item.startTime + item.duration;
+      hi = mid - 1;
     }
+  }
 
+  // 从 candidate 向前扫描，收集所有与 currentSeek 重叠的行
+  const activeCandidates: number[] = [];
+  for (let i = candidate; i >= 0; i--) {
+    const item = lyrics[i];
+    const start = item.type === "lyric" ? item.data.startTime : item.startTime;
+    if ((start || 0) > currentSeek) break;
+    const end = item.type === "lyric" ? (item.data.endTime ?? Infinity) : item.startTime + item.duration;
     if (currentSeek >= start && currentSeek < end) {
       activeCandidates.push(i);
     }
   }
+  // 从 candidate+1 向后扫描（处理倒计时等重叠行）
+  for (let i = candidate + 1; i < lyrics.length; i++) {
+    const item = lyrics[i];
+    const start = item.type === "lyric" ? item.data.startTime : item.startTime;
+    if ((start || 0) > currentSeek) break;
+    const end = item.type === "lyric" ? (item.data.endTime ?? Infinity) : item.startTime + item.duration;
+    if (currentSeek >= start && currentSeek < end) {
+      activeCandidates.push(i);
+    }
+  }
+
+  activeCandidates.sort((a, b) => a - b);
+
   // 如果没有活跃行，找最近的上一行
   if (activeCandidates.length === 0 && currentSeek > 0) {
-    // 找到第一个开始时间大于当前时间的行
-    const nextIndex = lyrics.findIndex((item) => {
-      const start = item.type === "lyric" ? item.data.startTime : item.startTime;
-      return (start || 0) > currentSeek;
-    });
-    if (nextIndex === -1) return [lyrics.length - 1]; // 都在后面，取最后一行
-    if (nextIndex > 0) return [nextIndex - 1]; // 取前一行
+    if (candidate >= 0) return [candidate];
+    return [lyrics.length - 1];
   }
   return activeCandidates;
 });
@@ -266,9 +286,12 @@ const firstActiveIndex = computed(() => {
   return activeLineIndices.value[0] ?? -1;
 });
 
+/** 活跃行索引集合，O(1) 查找 */
+const activeLineSet = computed(() => new Set(activeLineIndices.value));
+
 /** 判断某行是否高亮 */
 const isLineActive = (index: number): boolean => {
-  return activeLineIndices.value.includes(index);
+  return activeLineSet.value.has(index);
 };
 
 /**
@@ -388,6 +411,19 @@ const lrcAllLeave = () => {
   lyricsScroll(firstActiveIndex.value);
 };
 
+/**
+ * 歌词滚动区域变化时重新观察歌词行
+ * 新增的歌词行（如倒计时插入后）需要被 IntersectionObserver 观察
+ */
+const syncLyricVisibleRange = () => {
+  const container = lyricScrollContainer.value;
+  if (!container || !visibleLineObserver) return;
+  container.querySelectorAll('[id^="lrc-"]:not([data-observed])').forEach((el) => {
+    el.setAttribute("data-observed", "1");
+    visibleLineObserver!.observe(el);
+  });
+};
+
 type CssVars = Record<`--${string}`, string>;
 
 /** 逐字歌词淡入淡出因子 */
@@ -466,6 +502,40 @@ const isYrcLineOn = (index: number): boolean => {
 };
 
 /**
+ * 判断非活跃行是否在可视区域内
+ * 使用 IntersectionObserver 追踪的结果，避免每帧读取 DOM 布局属性
+ */
+const isVisibleInactiveLine = (index: number) => {
+  if (isYrcMode.value ? isYrcLineOn(index) : isLineActive(index)) return false;
+  return visibleLineIndices.has(index);
+};
+
+/**
+ * 初始化 IntersectionObserver 追踪歌词行可见性
+ */
+const initVisibleLineObserver = () => {
+  const container = lyricScrollContainer.value;
+  if (!container || visibleLineObserver) return;
+  visibleLineObserver = new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        const id = entry.target.id;
+        if (!id?.startsWith("lrc-")) continue;
+        const idx = Number.parseInt(id.slice(4), 10);
+        if (Number.isNaN(idx)) continue;
+        if (entry.isIntersecting) visibleLineIndices.add(idx);
+        else visibleLineIndices.delete(idx);
+      }
+    },
+    { root: container, threshold: 0 },
+  );
+  // 观察当前所有歌词行
+  container.querySelectorAll('[id^="lrc-"]').forEach((el) => {
+    visibleLineObserver!.observe(el);
+  });
+};
+
+/**
  * 获取歌词行 class
  * @param item 预处理后的歌词项
  * @param index 在列表中的索引
@@ -488,20 +558,28 @@ const getLyricLineClass = (item: ProcessedLyricItem, index: number) => {
 
 /**
  * 获取歌词行 style
- * @param item 预处理后的歌词项
- * @param index 在列表中的索引
+ * 仅在歌词模糊启用且活跃行变化时才返回新对象，避免每帧创建新对象触发 DOM 更新
  */
 const getLyricLineStyle = (item: ProcessedLyricItem, index: number) => {
   if (item.type !== "lyric") return {};
-
-  if (!settingStore.lyricsBlur) return { filter: "blur(0)" };
-  // 计算模糊程度
+  if (!settingStore.lyricsBlur) return BLUR_OFF_STYLE;
+  // 计算模糊程度（仅在活跃行变化时产生不同的值）
   const activeIdx = firstActiveIndex.value;
   const isOn = isLineActive(index);
-  return {
-    filter: isOn ? "blur(0)" : `blur(${Math.min(Math.abs(activeIdx - index) * 1.8, 10)}px)`,
-  };
+  if (isOn) return BLUR_ON_STYLE;
+  const blurPx = Math.min(Math.abs(activeIdx - index) * 1.8, 10);
+  // 缓存常用模糊值避免创建新对象
+  const cached = blurStyleCache[blurPx];
+  if (cached) return cached;
+  const style = { filter: `blur(${blurPx}px)` };
+  blurStyleCache[blurPx] = style;
+  return style;
 };
+
+/** 预分配的样式缓存，避免每帧为每行创建新对象 */
+const BLUR_OFF_STYLE = Object.freeze({ filter: "blur(0)" });
+const BLUR_ON_STYLE = Object.freeze({ filter: "blur(0)" });
+const blurStyleCache: Record<number, { filter: string }> = {};
 
 /**
  * 进度跳转
@@ -522,6 +600,7 @@ const jumpSeek = (time: number) => {
 // 监听歌词滚动
 watch(firstActiveIndex, (val, oldVal) => {
   lyricsScroll(val);
+  syncLyricVisibleRange();
   if (typeof oldVal === "number" && oldVal >= 0 && oldVal !== val) {
     yrcFadingLineIndex.value = oldVal;
     yrcFadingUntilAt.value = Date.now() + YRC_LINE_FADE_MS;
@@ -531,6 +610,7 @@ watch(firstActiveIndex, (val, oldVal) => {
 onMounted(() => {
   nextTick().then(() => {
     lyricsScroll(firstActiveIndex.value);
+    initVisibleLineObserver();
   });
   if (isElectron) {
     window.electron.ipcRenderer.on("lyricsScroll", () => lyricsScroll(firstActiveIndex.value));
@@ -538,6 +618,11 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  // 清理 IntersectionObserver
+  if (visibleLineObserver) {
+    visibleLineObserver.disconnect();
+    visibleLineObserver = null;
+  }
   // 清理滚动动画
   if (scrollAnimationId !== null) {
     cancelAnimationFrame(scrollAnimationId);
@@ -757,6 +842,9 @@ onBeforeUnmount(() => {
       &.is-bg {
         opacity: 0.85 !important;
       }
+    }
+    &.visible-inactive:not(.on) {
+      opacity: 0.45;
     }
     &::before {
       content: "";

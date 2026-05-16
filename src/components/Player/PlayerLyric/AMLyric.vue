@@ -8,6 +8,7 @@
           pure: statusStore.pureLyricMode,
           duet: hasDuet,
           'align-right': settingStore.lyricAlignRight,
+          android: isCapacitorAndroid,
         },
       ]"
       :style="{
@@ -32,21 +33,13 @@
         :playing="statusStore.playStatus"
         :enableSpring="settingStore.useAMSpring"
         :enableScale="settingStore.useAMSpring"
+        :optimizeForWebView="isAndroidSpringMode"
         :alignPosition="effectiveLyricsScrollOffset"
         :alignAnchor="effectiveLyricsScrollOffset > 0.4 ? 'center' : 'top'"
         :enableBlur="settingStore.lyricsBlur"
         :hidePassedLines="settingStore.hidePassedLines"
         :wordFadeWidth="settingStore.wordFadeWidth"
-        :style="{
-          '--display-count-down-show': settingStore.countDownShow ? 'flex' : 'none',
-          '--amll-lp-font-size': getFontSize(
-            settingStore.lyricFontSize,
-            settingStore.lyricFontSizeMode,
-          ),
-          'font-weight': settingStore.lyricFontWeight,
-          'font-family': settingStore.LyricFont !== 'follow' ? settingStore.LyricFont : '',
-          ...lyricLangFontStyle(settingStore),
-        }"
+        :style="lyricPlayerStyle"
         class="am-lyric"
         @line-click="jumpSeek"
       />
@@ -64,7 +57,7 @@ import { isCapacitorAndroid } from "@/utils/env";
 import { lyricLangFontStyle } from "@/utils/lyric/lyricFontConfig";
 import { getFontSize } from "@/utils/style";
 
-defineProps({
+const props = defineProps({
   currentTime: {
     type: Number,
     default: 0,
@@ -83,6 +76,8 @@ const effectiveLyricsScrollOffset = computed(() =>
     ? Math.max(0, settingStore.lyricsScrollOffset - 0.08)
     : settingStore.lyricsScrollOffset,
 );
+
+const isAndroidSpringMode = computed(() => isCapacitorAndroid && settingStore.useAMSpring);
 
 // 当前歌词
 const amLyricsData = computed(() => {
@@ -121,6 +116,72 @@ const hasDuet = computed(() => amLyricsData.value?.some((line) => line.isDuet) ?
 
 const isValidLyricTime = (time: unknown): time is number =>
   typeof time === "number" && Number.isFinite(time) && time >= 0;
+
+const clampTransitionDuration = (duration: number, min: number, max: number) =>
+  Math.round(Math.min(max, Math.max(min, duration)));
+
+const mainLineStartTimes = computed(() =>
+  amLyricsData.value
+    .filter((line) => !line.isBG && isValidLyricTime(line.startTime))
+    .map((line) => line.startTime)
+    .sort((previousTime, nextTime) => previousTime - nextTime),
+);
+
+const medianMainLineInterval = computed(() => {
+  const intervals = mainLineStartTimes.value
+    .slice(1)
+    .map((startTime, index) => startTime - mainLineStartTimes.value[index])
+    .filter((duration) => duration > 0);
+  if (intervals.length === 0) return 1000;
+
+  const sortedIntervals = [...intervals].sort((previousDuration, nextDuration) =>
+    previousDuration - nextDuration,
+  );
+  return sortedIntervals[Math.floor(sortedIntervals.length / 2)];
+});
+
+const currentMainLineInterval = computed(() => {
+  const startTimes = mainLineStartTimes.value;
+  if (startTimes.length < 2) return medianMainLineInterval.value;
+
+  let currentIndex = -1;
+  for (let index = startTimes.length - 1; index >= 0; index -= 1) {
+    if (startTimes[index] > props.currentTime) continue;
+    currentIndex = index;
+    break;
+  }
+  if (currentIndex < 0 || currentIndex >= startTimes.length - 1) return medianMainLineInterval.value;
+
+  const interval = startTimes[currentIndex + 1] - startTimes[currentIndex];
+  return interval > 0 ? interval : medianMainLineInterval.value;
+});
+
+const nonSpringTransitionStyle = computed(() => {
+  const lineInterval = currentMainLineInterval.value;
+  const transformDuration = clampTransitionDuration(lineInterval * 0.38, 160, 430);
+  const visualDuration = clampTransitionDuration(transformDuration * 0.75, 130, 330);
+  const bgActiveDelay = clampTransitionDuration(lineInterval * 0.16, 70, 250);
+  const bgScaleDuration = clampTransitionDuration(lineInterval * 0.85, 420, 1500);
+
+  return {
+    "--splayer-amll-transform-duration": `${transformDuration}ms`,
+    "--splayer-amll-visual-duration": `${visualDuration}ms`,
+    "--splayer-amll-bg-active-delay": `${bgActiveDelay}ms`,
+    "--splayer-amll-bg-scale-duration": `${bgScaleDuration}ms`,
+  };
+});
+
+const lyricPlayerStyle = computed(() => ({
+  "--display-count-down-show": settingStore.countDownShow ? "flex" : "none",
+  "--amll-lp-font-size": getFontSize(
+    settingStore.lyricFontSize,
+    settingStore.lyricFontSizeMode,
+  ),
+  "font-weight": settingStore.lyricFontWeight,
+  "font-family": settingStore.LyricFont !== "follow" ? settingStore.LyricFont : "",
+  ...nonSpringTransitionStyle.value,
+  ...lyricLangFontStyle(settingStore),
+}));
 
 // 获取原始歌词行的真实发声时间
 const getLineSeekTime = (line?: LyricLine) => {
@@ -180,6 +241,12 @@ watch(lyricPlayerRef, (player) => {
   height: 100%;
   overflow: hidden;
   isolation: isolate;
+
+  &.android {
+    :deep(.amll-lyric-player) {
+      mix-blend-mode: normal;
+    }
+  }
 
   :deep(.am-lyric) {
     width: 100%;
@@ -247,6 +314,21 @@ watch(lyricPlayerRef, (player) => {
   }
   :lang(ko) {
     font-family: var(--ko-font-family);
+  }
+
+  // 非弹簧模式过渡优化：更平滑的缓动曲线和 GPU 合成提示
+  :deep(.amll-lyric-player[class*="disableSpring"]) {
+    > * {
+      transition:
+        filter var(--splayer-amll-visual-duration, 0.3s) cubic-bezier(0.25, 0.1, 0.25, 1),
+        transform var(--splayer-amll-transform-duration, 0.38s)
+          cubic-bezier(0.25, 0.1, 0.25, 1),
+        opacity var(--splayer-amll-visual-duration, 0.3s) cubic-bezier(0.25, 0.1, 0.25, 1),
+        background-color 0.25s,
+        box-shadow 0.25s;
+      will-change: transform, opacity;
+      backface-visibility: hidden;
+    }
   }
 }
 
