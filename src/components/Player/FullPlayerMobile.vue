@@ -181,10 +181,12 @@ const { timeDisplay, toggleTimeFormat } = useTimeFormat();
 const LYRIC_HEADER_MAX_PADDING = 60;
 const AMLL_LINE_PADDING_MOBILE = 20;
 
+let savedPageIndex = 0;
+
 const mobileStart = ref<HTMLElement | null>(null);
 const topBarRef = ref<HTMLElement | null>(null);
 const dragHandleRef = ref<HTMLElement | null>(null);
-const pageIndex = ref(0);
+const pageIndex = ref(savedPageIndex);
 
 const lyricHeaderHorizontalPadding = computed(() => {
   const padding =
