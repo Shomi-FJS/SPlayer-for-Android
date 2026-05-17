@@ -333,13 +333,13 @@ watch(
 onMounted(() => {
   mainCoverColor.value = statusStore.mainColor;
   if (isElectron && settingStore.preventSleep) {
-    window.electron?.ipcRenderer.send("prevent-sleep", true);
+    window.electron.ipcRenderer.send("prevent-sleep", true);
   }
 });
 
 onBeforeUnmount(() => {
   stopShow();
-  if (isElectron) window.electron?.ipcRenderer.send("prevent-sleep", false);
+  if (isElectron) window.electron.ipcRenderer.send("prevent-sleep", false);
 });
 </script>
 

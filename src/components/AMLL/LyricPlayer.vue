@@ -283,7 +283,6 @@ onMounted(() => {
     try {
       playerRef.value = new CoreLyricPlayer();
     } finally {
-      // 无论构造是否抛错，都必须还原全局原型，避免污染整个应用
       EventTarget.prototype.addEventListener = origAddEventListener;
     }
 
@@ -306,22 +305,38 @@ onUnmounted(() => {
 });
 
 // 动画帧更新
+// 限制后台恢复后的首帧增量
+const MAX_FRAME_DELTA = 64;
 watchEffect((onCleanup) => {
   if (!props.disabled) {
     let canceled = false;
     let lastTime = -1;
+    const resetLastTime = () => {
+      lastTime = -1;
+    };
+    const onVisibility = () => {
+      // 切换可见性时复位帧时间
+      if (document.visibilityState === "hidden" || document.visibilityState === "visible") {
+        resetLastTime();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
     const onFrame = (time: number) => {
       if (canceled) return;
       if (lastTime === -1) {
         lastTime = time;
       }
-      playerRef.value?.update(time - lastTime);
+      const rawDelta = time - lastTime;
+      // 防止后台恢复后动画大跳
+      const delta = rawDelta > MAX_FRAME_DELTA ? MAX_FRAME_DELTA : rawDelta;
+      playerRef.value?.update(delta);
       lastTime = time;
       requestAnimationFrame(onFrame);
     };
     requestAnimationFrame(onFrame);
     onCleanup(() => {
       canceled = true;
+      document.removeEventListener("visibilitychange", onVisibility);
     });
   }
 });

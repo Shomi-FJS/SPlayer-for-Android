@@ -9,13 +9,18 @@
         'phone-floating': isPhone,
       },
     ]"
-    @pointerdown="onPointerDown"
-    @pointermove="onPointerMove"
-    @pointerup="onPointerEnd"
-    @pointercancel="onPointerEnd"
   >
     <!-- 进度条 -->
     <PlayerSlider />
+    <!-- 控制栏（悬浮条本体） -->
+    <div
+      ref="playerBodyRef"
+      class="main-player-body"
+      @pointerdown="onPointerDown"
+      @pointermove="onPointerMove"
+      @pointerup="onPointerEnd"
+      @pointercancel="onPointerEnd"
+    >
     <!-- 信息 -->
     <div :class="['play-data', { 'hidden-cover': settingStore.hiddenCovers.player }]">
       <!-- 封面 -->
@@ -245,6 +250,7 @@
         <PlayerRightMenu />
       </n-flex>
     </Transition>
+    </div>
   </div>
 </template>
 
@@ -282,6 +288,7 @@ const { isPhone } = useDevice();
 const { timeDisplay, toggleTimeFormat } = useTimeFormat();
 
 const playerRef = ref<HTMLElement | null>(null);
+const playerBodyRef = ref<HTMLElement | null>(null);
 
 // 触摸滑动切换歌曲 / 上滑跟手开启全屏播放器（自实现 Pointer 事件，配合 setPointerCapture）
 let dragOpenActive = false;
@@ -488,8 +495,7 @@ const finishDragOpen = (dy: number) => {
     // 注册关闭最终落实回调，便于在新手势打断时同步执行，避免 FullPlayer 被卡在起始位置
     pendingCloseFinalize = () => {
       statusStore.showFullPlayer = false;
-      // 这里不再延迟 360ms reset：新手势打断的情况下需要立即清理 inline，
-      // 正常路径下 onMobileLeave 会负责接管离场动画
+      // 新手势打断的情况下需要立即清理 inline，正常路径下 onMobileLeave 会负责接管离场动画
       resetDragOpen();
     };
     dragOpenCloseTimer = window.setTimeout(() => {
@@ -569,7 +575,7 @@ const onPointerMove = (e: PointerEvent) => {
       // 锁定方向后再捕获指针，确保 FullPlayer 覆盖后事件仍流向底栏
       pointerActiveTarget?.setPointerCapture?.(e.pointerId);
       // 缓存底栏顶部坐标，作为卡片起始位移
-      const rect = playerRef.value?.getBoundingClientRect();
+      const rect = playerBodyRef.value?.getBoundingClientRect();
       dragStartTop = rect ? rect.top : window.innerHeight - 80;
       dragOpenTravel = Math.max(window.innerHeight * 0.55, 360);
       setDragOpenFlag(true);
@@ -763,12 +769,8 @@ const showCreatorTip = () => window.$message.info("暂不支持查看主播主�
   padding: 0 15px;
   width: 100%;
   background-color: var(--surface-container-hex);
-  display: grid;
-  grid-template-columns: 1fr auto 1fr;
-  align-items: center;
   transition: bottom 0.3s;
   z-index: 10;
-  // 接管指针手势，避免浏览器滚动抢占垂直方向触发取消捕获
   touch-action: pan-x;
   &.show {
     bottom: 0;
@@ -782,6 +784,13 @@ const showCreatorTip = () => window.$message.info("暂不支持查看主播主�
     margin: 0;
     --n-rail-height: 3px;
     --n-handle-size: 14px;
+  }
+  .main-player-body {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    align-items: center;
+    height: 100%;
+    touch-action: none;
   }
   .play-data {
     position: relative;
@@ -1015,7 +1024,9 @@ const showCreatorTip = () => window.$message.info("暂不支持查看主播主�
     }
   }
   @media (max-width: 810px) {
-    grid-template-columns: 1fr auto auto;
+    .main-player-body {
+      grid-template-columns: 1fr auto auto;
+    }
     .play-control {
       margin: 0 0 0 12px;
       .play-icon {
@@ -1163,12 +1174,9 @@ const showCreatorTip = () => window.$message.info("暂不支持查看主播主�
         --n-height: 38px;
         margin: 0 2px;
       }
-      .play-icon {
-        width: 32px;
-        height: 32px;
-        margin: 0;
-        .n-icon {
-          font-size: 20px;
+      @media (orientation: portrait) {
+        .play-icon {
+          display: none;
         }
       }
     }
