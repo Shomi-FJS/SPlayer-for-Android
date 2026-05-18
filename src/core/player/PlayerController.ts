@@ -252,7 +252,9 @@ class PlayerController {
     // 同步 Android 悬浮歌词歌曲信息
     this.syncFloatingLyricSongInfo();
     // 获取歌词
-    lyricManager.handleLyric(song);
+    // 延后到下一拍：让 musicStore.playSong 引发的响应式扇出（封面、歌名、watch 副作用）先消化一帧，
+    // 再启动歌词请求构造与网络发起；切歌首帧响应快 30-50ms
+    queueMicrotask(() => lyricManager.handleLyric(song));
   }
 
   /**
@@ -300,7 +302,16 @@ class PlayerController {
       // 立即停止当前播放 (除非是 Crossfade)
       statusStore.playLoading = true;
       if (!options.crossfade) {
-        audioManager.stop();
+        // Android 原生引擎：stop 会让 ExoPlayer 进入 IDLE 状态并清空 _src/_currentTime，
+        // 紧接着 setupSongUI 又把进度重置一次，再 load() 又得 IDLE→PREPARE→READY 转换，
+        // 引发媒体栏闪烁 + UI 进度条二次跳变。
+        // 改用 pause：音频立即沉默（与 stop 同效），但 ExoPlayer 保持 READY，
+        // 下一次 load() 直接 setMediaItem 替换，状态稳定，少一次跨 JNI 往返。
+        if (audioManager.engineType === "android-native") {
+          audioManager.pause({ fadeOut: false });
+        } else {
+          audioManager.stop();
+        }
       }
       // 立即更新 UI（歌曲信息、封面、歌词等），无需等待网络请求
       this.setupSongUI(playSongData, seek);
@@ -606,8 +617,10 @@ class PlayerController {
       await this.parseLocalMusicInfo(song.path);
     }
 
-    // 预载下一首
-    await this.syncAndroidPlaybackContext(song);
+    // 预载下一首：fire-and-forget，让 playLoading=false 不被网络请求阻塞 1-3s
+    // syncAndroidPlaybackContext 内部会做 prefetchNextSong（网络）+ 多次 IPC，
+    // 这些都不应该卡住 loading 转圈的消失时机，让后续 UI 流程立即继续。
+    void this.syncAndroidPlaybackContext(song);
     if (settingStore.useNextPrefetch) songManager.prefetchNextSong();
 
     // Last.fm Scrobbler

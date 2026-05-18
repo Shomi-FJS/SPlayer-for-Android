@@ -164,6 +164,19 @@ export const getCoverColorData = (dom: HTMLImageElement) => {
 };
 
 /**
+ * 把主线程重活调度到空闲帧执行，避免在切歌首帧阻塞 30-100ms
+ */
+const runWhenIdle = (cb: () => void): void => {
+  const ric = (window as unknown as { requestIdleCallback?: typeof requestIdleCallback })
+    .requestIdleCallback;
+  if (typeof ric === "function") {
+    ric(() => cb(), { timeout: 200 });
+  } else {
+    setTimeout(cb, 0);
+  }
+};
+
+/**
  * 获取歌曲封面颜色数据
  * @param coverUrl 歌曲封面地址
  */
@@ -175,18 +188,20 @@ export const getCoverColor = async (coverUrl: string) => {
   const image = new Image();
   image.crossOrigin = "Anonymous";
   image.src = coverUrl;
-  // 图像加载完成
+  // 图像加载完成：把 canvas 像素采样推到空闲帧，避免阻塞切歌首屏渲染
   image.onload = () => {
-    // 获取图片数据
-    const coverColorData = getCoverColorData(image);
-    if (coverColorData) statusStore.songCoverTheme = coverColorData;
-    if (!settingStore.playerFollowCoverColor) {
-      statusStore.songCoverTheme.main = { r: 239, g: 239, b: 239 };
-    }
-    // 获取任务栏封面颜色
-    sendTaskbarCoverColor();
-    // 移除元素
-    image.remove();
+    runWhenIdle(() => {
+      // 获取图片数据
+      const coverColorData = getCoverColorData(image);
+      if (coverColorData) statusStore.songCoverTheme = coverColorData;
+      if (!settingStore.playerFollowCoverColor) {
+        statusStore.songCoverTheme.main = { r: 239, g: 239, b: 239 };
+      }
+      // 获取任务栏封面颜色
+      sendTaskbarCoverColor();
+      // 移除元素
+      image.remove();
+    });
   };
 };
 

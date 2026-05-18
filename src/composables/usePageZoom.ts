@@ -13,8 +13,10 @@ export const usePageZoom = () => {
 
   const notifyResize = () => {
     // 视口变化后主动触发 resize，让 VueUse / Naive UI 等库重算布局
+    // 不在同步阶段 fire：viewport meta 更新后 WebView 需要一帧才会算出新的 innerWidth，
+    // 立即派发 resize 时下游拿到的仍是旧尺寸，反而产生一次无效的布局抖动。
+    // 用 rAF + 150ms 兜底两次，覆盖大多数 WebView 实现的视口重排时机。
     const fire = () => window.dispatchEvent(new Event("resize"));
-    fire();
     requestAnimationFrame(fire);
     setTimeout(fire, 150);
   };

@@ -142,20 +142,31 @@
       </nav>
     </Transition>
 
-    <SongPlayList />
-    <MainPlayer />
-    <PlayerProvider>
-      <FullPlayer />
-    </PlayerProvider>
+    <SongPlayListAsync />
+    <MainPlayerAsync />
+    <PlayerProviderAsync>
+      <FullPlayerAsync />
+    </PlayerProviderAsync>
   </div>
 </template>
 
 <script setup lang="ts">
+import { defineAsyncComponent } from "vue";
 import { useMusicStore, useStatusStore, useSettingStore, useDataStore } from "@/stores";
 import { useBlobURLManager } from "@/core/resource/BlobURLManager";
 import { isElectron } from "@/utils/env";
 import { useDevice } from "@/composables/useDevice";
 import { useInit } from "@/composables/useInit";
+
+// 大型播放器相关组件异步加载，缩减主 chunk 与首帧成本
+const MainPlayerAsync = defineAsyncComponent(() => import("@/components/Player/MainPlayer.vue"));
+const FullPlayerAsync = defineAsyncComponent(() => import("@/components/Player/FullPlayer.vue"));
+const SongPlayListAsync = defineAsyncComponent(
+  () => import("@/components/List/SongPlayList.vue"),
+);
+const PlayerProviderAsync = defineAsyncComponent(
+  () => import("@/components/Global/PlayerProvider.vue"),
+);
 
 const musicStore = useMusicStore();
 const statusStore = useStatusStore();

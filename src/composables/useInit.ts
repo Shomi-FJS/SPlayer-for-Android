@@ -32,12 +32,8 @@ export const useInit = () => {
   onMounted(async () => {
     // 检查并执行设置迁移
     settingStore.checkAndMigrate();
-    // 打印版本信息
-    printVersion();
-    // 用户协议
-    openUserAgreement();
-    // 加载数据
-    await dataStore.loadData();
+    // 仅加载播放器启动必需的 playList，其它列表后台加载
+    await dataStore.loadCriticalData();
     // 初始化 MediaSession
     mediaSessionManager.init();
     // 初始化播放器
@@ -47,61 +43,67 @@ export const useInit = () => {
     });
     // 同步播放模式
     player.playModeSyncIpc();
-    // 初始化自动关闭定时器
-    if (statusStore.autoClose.enable) {
-      const { endTime, time } = statusStore.autoClose;
-      const now = Date.now();
-      if (endTime > now) {
-        // 计算真实剩余时间
-        const realRemainTime = Math.ceil((endTime - now) / 1000);
-        player.startAutoCloseTimer(time, realRemainTime);
-      } else {
-        // 定时器已过期，重置状态
-        statusStore.autoClose.enable = false;
-        statusStore.autoClose.remainTime = time * 60;
-        statusStore.autoClose.endTime = 0;
-      }
-    }
+    // 后台加载剩余数据（不阻塞播放路径与首屏）
+    void dataStore.loadRestData();
 
-    // 监听设置变化以更新 ReplayGain
+    // 监听设置变化以更新 ReplayGain（依赖 player 已完成基础初始化，放在 onMounted）
     watch(
       () => [settingStore.enableReplayGain, settingStore.replayGainMode],
       () => player.applyReplayGain(),
     );
 
-    if (isElectron) {
-      // 注册全局快捷键
-      shortcutStore.registerAllShortcuts();
-      // 初始化下载管理器
-      downloadManager.init();
-      // 显示窗口
-      window.electron.ipcRenderer.send("win-loaded");
-      // 同步任务栏歌词状态
-      const taskbarConfig = await window.electron.ipcRenderer.invoke(
-        TASKBAR_IPC_CHANNELS.GET_OPTION,
-      );
-      statusStore.showTaskbarLyric =
-        taskbarConfig?.enabled ?? statusStore.showTaskbarLyric ?? false;
-      window.electron.ipcRenderer.send(
-        TASKBAR_IPC_CHANNELS.SET_OPTION,
-        { enabled: statusStore.showTaskbarLyric },
-        true,
-      );
-      // 显示桌面歌词
-      window.electron.ipcRenderer.send("desktop-lyric:toggle", statusStore.showDesktopLyric);
-      // 检查更新
-      if (settingStore.checkUpdateOnStart) window.electron.ipcRenderer.send("check-update", false);
-      // 如果启用macOS歌词，发送初始数据
-      if (isMac && settingStore.macos.statusBarLyric.enabled) {
-        window.electron.ipcRenderer.send(TASKBAR_IPC_CHANNELS.REQUEST_DATA);
+    // 非关键操作延迟到首帧渲染完成后执行，减轻冷启动压力
+    requestAnimationFrame(() => {
+      // 打印版本信息
+      printVersion();
+      // 用户协议
+      openUserAgreement();
+      // 初始化自动关闭定时器
+      if (statusStore.autoClose.enable) {
+        const { endTime, time } = statusStore.autoClose;
+        const now = Date.now();
+        if (endTime > now) {
+          const realRemainTime = Math.ceil((endTime - now) / 1000);
+          player.startAutoCloseTimer(time, realRemainTime);
+        } else {
+          statusStore.autoClose.enable = false;
+          statusStore.autoClose.remainTime = time * 60;
+          statusStore.autoClose.endTime = 0;
+        }
       }
-      // 确保主窗口在最后获得焦点
-      if (statusStore.showDesktopLyric) {
-        setTimeout(() => {
-          window.electron.ipcRenderer.send("win-show-main");
-        }, FINAL_FOCUS_DELAY_MS);
+
+      if (isElectron) {
+        void (async () => {
+          if (!window.electron) return;
+          shortcutStore.registerAllShortcuts();
+          downloadManager.init();
+          window.electron.ipcRenderer.send("win-loaded");
+          const taskbarConfig = (await window.electron.ipcRenderer.invoke(
+            TASKBAR_IPC_CHANNELS.GET_OPTION,
+          )) as { enabled?: boolean };
+          statusStore.showTaskbarLyric =
+            taskbarConfig?.enabled ?? statusStore.showTaskbarLyric ?? false;
+          window.electron.ipcRenderer.send(
+            TASKBAR_IPC_CHANNELS.SET_OPTION,
+            { enabled: statusStore.showTaskbarLyric },
+            true,
+          );
+          window.electron.ipcRenderer.send("desktop-lyric:toggle", statusStore.showDesktopLyric);
+          if (settingStore.checkUpdateOnStart)
+            window.electron.ipcRenderer.send("check-update", false);
+          if (isMac && settingStore.macos.statusBarLyric.enabled) {
+            window.electron.ipcRenderer.send(TASKBAR_IPC_CHANNELS.REQUEST_DATA);
+          }
+          if (statusStore.showDesktopLyric) {
+            setTimeout(() => {
+              window.electron?.ipcRenderer.send("win-show-main");
+            }, FINAL_FOCUS_DELAY_MS);
+          }
+        })().catch((err) => {
+          console.error("Electron 初始化阶段出错:", err);
+        });
       }
-    }
+    });
   });
 };
 
@@ -128,8 +130,7 @@ const keyDownEvent = debounce((event: KeyboardEvent) => {
   const isShift = event.shiftKey;
   const isAlt = event.altKey;
   // 循环注册快捷键
-  for (const shortcutKey in shortcutStore.shortcutList) {
-    const shortcut = shortcutStore.shortcutList[shortcutKey];
+  for (const [shortcutKey, shortcut] of Object.entries(shortcutStore.shortcutList)) {
     const shortcutParts = shortcut.shortcut.split("+");
     // 标志位
     let match = true;
