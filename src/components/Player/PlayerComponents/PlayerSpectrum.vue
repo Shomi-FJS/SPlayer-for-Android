@@ -20,50 +20,60 @@ const player = usePlayerController();
 const canvasRef = ref<HTMLCanvasElement | null>(null);
 const isKeepDrawing = ref<boolean>(true);
 
-/**
- * 绘制音乐频谱图
- */
-const drawSpectrum = () => {
-  const spectrumData = player.getSpectrumData();
+const SKIP_BINS = 10;
+const SPECTRUM_GAIN = 0.8;
+let cachedCanvasWidth = 0;
+let cachedCanvasHeight = 0;
+let cachedPixelRatio = 0;
+let ctx: CanvasRenderingContext2D | null = null;
 
+// 仅在尺寸变化时重设 canvas，避免每帧重建上下文
+const updateCanvasSize = () => {
+  if (!canvasRef.value) return;
+  const targetWidth = Math.min(document.body.clientWidth, 1600);
+  const targetHeight = props.height || 80;
+  const targetPixelRatio = window.devicePixelRatio || 1;
+  if (
+    targetWidth !== cachedCanvasWidth ||
+    targetHeight !== cachedCanvasHeight ||
+    targetPixelRatio !== cachedPixelRatio
+  ) {
+    canvasRef.value.width = Math.round(targetWidth * targetPixelRatio);
+    canvasRef.value.height = Math.round(targetHeight * targetPixelRatio);
+    canvasRef.value.style.width = `${targetWidth}px`;
+    canvasRef.value.style.height = `${targetHeight}px`;
+    cachedCanvasWidth = targetWidth;
+    cachedCanvasHeight = targetHeight;
+    cachedPixelRatio = targetPixelRatio;
+    ctx = canvasRef.value.getContext("2d");
+    ctx?.setTransform(targetPixelRatio, 0, 0, targetPixelRatio, 0, 0);
+  }
+};
+
+const drawSpectrum = () => {
+  if (!isKeepDrawing.value || !ctx) return;
+  const spectrumData = player.getSpectrumData();
   if (!spectrumData) return;
-  // 转换为普通数组并处理
-  const data = Array.from(spectrumData).slice(10);
-  if (!isKeepDrawing.value || !canvasRef.value) return;
-  // 设置画布宽度，最大为 1600
-  canvasRef.value.width = document.body.clientWidth >= 1600 ? 1600 : document.body.clientWidth;
-  // 设置画布高度
-  canvasRef.value.height = props.height || 80;
-  // 获取2D上下文
-  const ctx: CanvasRenderingContext2D | null = canvasRef.value.getContext("2d");
-  // 画布宽高
-  const canvasWidth = canvasRef.value.width;
-  const canvasHeight = canvasRef.value.height;
-  // 频谱数量
-  const numBars = data.length / 2.5;
-  // 圆角半径
+  const dataLen = spectrumData.length - SKIP_BINS;
+  if (dataLen <= 0) return;
+  const numBars = Math.floor(dataLen / 2.5);
+  if (numBars <= 0) return;
+  const canvasWidth = cachedCanvasWidth;
+  const canvasHeight = cachedCanvasHeight;
   const cornerRadius = props.radius || 2.5;
-  // 柱形宽度
   const barWidth = canvasWidth / numBars / 2;
-  if (!ctx) return;
-  // 清除画布
+  const halfWidth = canvasWidth / 2;
+  const drawWidth = barWidth - 3;
   ctx.clearRect(0, 0, canvasWidth, canvasHeight);
-  // 遍历音频频谱数据
+  ctx.fillStyle = props.color || "#efefef";
   for (let i = 0; i < numBars; i++) {
-    // 计算柱形高度
-    const barHeight = (data[i] / 255) * canvasHeight;
-    // 计算柱形的 x 和 y 坐标
-    const x1 = i * barWidth + canvasWidth / 2;
-    const x2 = canvasWidth / 2 - (i + 1) * barWidth;
+    const barHeight = (spectrumData[i + SKIP_BINS] / 255) * canvasHeight * SPECTRUM_GAIN;
+    if (barHeight <= 0) continue;
+    const x1 = i * barWidth + halfWidth;
+    const x2 = halfWidth - (i + 1) * barWidth;
     const y = canvasHeight - barHeight;
-    // 设置柱形颜色，如果未设置则使用默认颜色
-    ctx.fillStyle = props.color || "#efefef";
-    // 检查柱形高度是否大于0，避免绘制高度为0的柱形
-    if (barHeight > 0) {
-      // 调用绘制圆角矩形的函数
-      roundRect(ctx, x1, y, barWidth - 3, barHeight, cornerRadius);
-      roundRect(ctx, x2, y, barWidth - 3, barHeight, cornerRadius);
-    }
+    roundRect(ctx, x1, y, drawWidth, barHeight, cornerRadius);
+    roundRect(ctx, x2, y, drawWidth, barHeight, cornerRadius);
   }
 };
 
@@ -106,14 +116,59 @@ const { pause: pauseDraw, resume: resumeDraw } = useRafFn(
   { immediate: false },
 );
 
+// 监听窗口尺寸变化（仅在尺寸真变化时重设 canvas）
+const onResize = () => updateCanvasSize();
+
+// 频谱采集句柄状态：避免重复 acquire/release 撕裂 Java 端 visualizerRefCount
+let visualizerHeld = false;
+const acquireVis = () => {
+  if (visualizerHeld) return;
+  visualizerHeld = true;
+  void player.acquireVisualizer();
+};
+const releaseVis = () => {
+  if (!visualizerHeld) return;
+  visualizerHeld = false;
+  player.releaseVisualizer();
+};
+
+// 后台/锁屏时立即停止 FFT 采集与 RAF 绘制；回前台时即时恢复
+const onVisibility = () => {
+  if (typeof document === "undefined") return;
+  if (document.visibilityState === "visible") {
+    if (!isKeepDrawing.value) return;
+    acquireVis();
+    resumeDraw();
+  } else {
+    pauseDraw();
+    releaseVis();
+  }
+};
+
 onMounted(() => {
   isKeepDrawing.value = true;
-  resumeDraw();
+  updateCanvasSize();
+  window.addEventListener("resize", onResize);
+  document.addEventListener("visibilitychange", onVisibility);
+  // 仅在前台时申请 Visualizer + 启动 RAF；后台启动直接保持暂停态
+  if (document.visibilityState === "visible") {
+    acquireVis();
+    resumeDraw();
+  }
 });
+
+// height prop 变化时同步 canvas 尺寸
+watch(
+  () => props.height,
+  () => updateCanvasSize(),
+);
 
 onBeforeUnmount(() => {
   isKeepDrawing.value = false;
   pauseDraw();
+  window.removeEventListener("resize", onResize);
+  document.removeEventListener("visibilitychange", onVisibility);
+  releaseVis();
 });
 </script>
 

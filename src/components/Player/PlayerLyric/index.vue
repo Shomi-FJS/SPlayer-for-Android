@@ -107,12 +107,30 @@ const currentSongId = computed(() => musicStore.playSong?.id as number | undefin
 // 实时播放进度
 const playSeek = ref<number>(player.getSeek() + statusStore.getSongOffset(musicStore.playSong?.id));
 
-// 实时更新播放进度
-const { pause: pauseSeek, resume: resumeSeek } = useRafFn(() => {
+// 立即把 playSeek 拉到当前真实播放位置（不等下一帧 rAF）
+const syncPlaySeek = () => {
   const songId = musicStore.playSong?.id;
   const offsetTime = statusStore.getSongOffset(songId);
   playSeek.value = player.getSeek() + offsetTime;
+};
+
+// 实时更新播放进度
+const { pause: pauseSeek, resume: resumeSeek } = useRafFn(syncPlaySeek);
+
+// tab 切回 / 偏移变更时立即同步，避免歌词与音频逐词错位
+const onVisibility = () => {
+  if (document.visibilityState === "visible") syncPlaySeek();
+};
+// 切曲时 player seek 尚未重置，先归零等 tick 稳定后再同步真实进度
+watch(currentSongId, async () => {
+  playSeek.value = statusStore.getSongOffset(musicStore.playSong?.id);
+  await nextTick();
+  syncPlaySeek();
 });
+watch(
+  () => statusStore.getSongOffset(currentSongId.value),
+  () => syncPlaySeek(),
+);
 
 /**
  * 当前进度偏移值
@@ -154,10 +172,12 @@ const resetOffset = () => {
 
 onMounted(() => {
   resumeSeek();
+  document.addEventListener("visibilitychange", onVisibility);
 });
 
 onBeforeUnmount(() => {
   pauseSeek();
+  document.removeEventListener("visibilitychange", onVisibility);
 });
 </script>
 
