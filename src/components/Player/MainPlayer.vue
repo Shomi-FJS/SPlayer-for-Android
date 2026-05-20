@@ -459,8 +459,7 @@ const finishDragOpen = (dy: number) => {
   }
   if (shouldOpen) {
     if (dragOpenParent) {
-      dragOpenParent.style.transition =
-        "transform 0.28s cubic-bezier(0.22, 1, 0.36, 1)";
+      dragOpenParent.style.transition = "transform 0.28s cubic-bezier(0.22, 1, 0.36, 1)";
       dragOpenParent.style.transform = "";
       // 立即恢复全屏播放器的指针事件，避免开启动画期间 (~320ms) 触摸穿透到底层主页
       dragOpenParent.style.pointerEvents = "";
@@ -477,8 +476,7 @@ const finishDragOpen = (dy: number) => {
     }, 320);
   } else {
     if (dragOpenParent) {
-      dragOpenParent.style.transition =
-        "transform 0.24s cubic-bezier(0.4, 0, 1, 1)";
+      dragOpenParent.style.transition = "transform 0.24s cubic-bezier(0.4, 0, 1, 1)";
       dragOpenParent.style.transform = `translate3d(0, ${dragStartTop}px, 0) scale(0.92)`;
     }
     if (dragOpenMain) {
