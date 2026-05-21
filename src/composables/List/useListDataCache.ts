@@ -1,6 +1,5 @@
 import type { CoverType, SongType } from "@/types/main";
 import { useCacheManager } from "@/core/resource/CacheManager";
-import { isElectron } from "@/utils/env";
 
 /**
  * 列表类型
@@ -57,8 +56,6 @@ export const useListDataCache = () => {
     detail: CoverType,
     songs: SongType[],
   ): Promise<void> => {
-    if (!isElectron) return;
-
     const cacheData: ListCacheData = {
       version: CACHE_VERSION,
       timestamp: Date.now(),
@@ -86,8 +83,6 @@ export const useListDataCache = () => {
    * @returns 缓存数据，如果不存在或已过期则返回 null
    */
   const loadCache = async (type: ListType, id: number): Promise<ListCacheData | null> => {
-    if (!isElectron) return null;
-
     const key = getCacheKey(type, id);
 
     try {
@@ -157,8 +152,6 @@ export const useListDataCache = () => {
    * @param id 列表 ID
    */
   const removeCache = async (type: ListType, id: number): Promise<void> => {
-    if (!isElectron) return;
-
     const key = getCacheKey(type, id);
 
     try {
@@ -173,8 +166,6 @@ export const useListDataCache = () => {
    * 清除所有列表缓存
    */
   const clearAllCache = async (): Promise<void> => {
-    if (!isElectron) return;
-
     try {
       await cacheManager.clear("list-data");
       console.log(`🗑️ All list cache cleared`);

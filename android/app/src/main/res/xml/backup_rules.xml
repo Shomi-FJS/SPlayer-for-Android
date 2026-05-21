@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  排除缓存目录与外部缓存：缓存语义上不该被 ADB 备份/恢复，否则会膨胀备份体积。
+  其他 SharedPreferences / WebView LocalStorage 仍允许备份（用户登录态、设置等）。
+-->
+<full-backup-content>
+    <exclude domain="cache" />
+    <exclude domain="external_cache" />
+</full-backup-content>

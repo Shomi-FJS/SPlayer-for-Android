@@ -200,16 +200,33 @@ class MediaSessionManager {
     }
   }
 
-  public async syncAndroidApiContext() {
+  /**
+   * 切歌时 PlayerController.syncAndroidPlaybackContext 与 MediaSessionManager.updateMetadata
+   * 都会调一次 syncApiContext，参数完全一致。Java 端幂等，但 IPC 跨 JNI 仍要 30-150ms。
+   * 这里用 lastKey 去重：参数无变化直接 resolve，避免主线程上重复 await。
+   */
+  private lastSyncedApiContextKey: string | null = null;
+
+  public async syncAndroidApiContext(force: boolean = false) {
     if (!isCapacitorAndroid) return;
 
     const settingStore = useSettingStore();
     const musicCookie = getCookie("MUSIC_U");
+    const cookie = musicCookie ? `MUSIC_U=${musicCookie};os=pc;` : "";
+    const key = `${EMBEDDED_API_BASE_URL}|${cookie}|${settingStore.songLevel}`;
+    if (!force && this.lastSyncedApiContextKey === key) return;
+
     await AndroidNativePlayback.syncApiContext({
       apiBaseUrl: EMBEDDED_API_BASE_URL,
-      cookie: musicCookie ? `MUSIC_U=${musicCookie};os=pc;` : "",
+      cookie,
       songLevel: settingStore.songLevel,
     });
+    this.lastSyncedApiContextKey = key;
+  }
+
+  /** 用户登录登出 / 切换音质后调用，清空 dedup 强制下次同步。 */
+  public invalidateSyncedApiContext() {
+    this.lastSyncedApiContextKey = null;
   }
 
   public init() {

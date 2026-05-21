@@ -44,7 +44,7 @@
           @click="router.push({ path: `/playlist`, query: { id: item.id } })"
         >
           <div class="playlist-cover">
-            <s-image :src="item.cover" class="cover-img" />
+            <s-image :src="item.cover" cache-type="list-covers" class="cover-img" />
             <div class="play-count">
               <SvgIcon name="Play" :size="12" />
               {{ formatPlayCount(item.playCount) }}
@@ -71,7 +71,7 @@
           @click="router.push({ path: `/album`, query: { id: item.id } })"
         >
           <div class="album-cover">
-            <s-image :src="item.cover" class="cover-img" />
+            <s-image :src="item.cover" cache-type="list-covers" class="cover-img" />
           </div>
           <div class="album-name">{{ item.name }}</div>
           <div class="album-artist">{{ item.artist }}</div>
@@ -95,7 +95,7 @@
           @click="router.push({ path: `/artist`, query: { id: item.id } })"
         >
           <div class="artist-avatar">
-            <s-image :src="item.cover" class="avatar-img" />
+            <s-image :src="item.cover" cache-type="list-covers" class="avatar-img" />
           </div>
           <div class="artist-name">{{ item.name }}</div>
         </div>
@@ -118,7 +118,7 @@
           @click="router.push({ path: `/video`, query: { id: item.id } })"
         >
           <div class="video-cover">
-            <s-image :src="item.cover" class="cover-img" />
+            <s-image :src="item.cover" cache-type="list-covers" class="cover-img" />
             <div class="video-duration">{{ item.duration }}</div>
             <div class="play-overlay">
               <SvgIcon name="Play" :size="32" />

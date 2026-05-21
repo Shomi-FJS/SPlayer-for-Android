@@ -20,6 +20,7 @@ import android.os.Looper;
 import android.os.PowerManager;
 import android.util.Log;
 import android.view.KeyEvent;
+import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.core.app.NotificationCompat;
 import androidx.core.app.NotificationManagerCompat;
@@ -64,6 +65,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import top.imsyy.splayer.android.MainActivity;
 import top.imsyy.splayer.android.R;
+import top.imsyy.splayer.android.cache.AudioCacheProvider;
+import top.imsyy.splayer.android.cache.AudioPrefetchTtlIndex;
 
 @UnstableApi
 public final class PlaybackManager {
@@ -92,6 +95,8 @@ public final class PlaybackManager {
   private Player sessionPlayer;
   private MediaSession mediaSession;
   private PlaybackService service;
+  /** PlaybackService 是否已通过 onCreate→attachService 启动并保持运行；用于 ensureServiceRunning 节流。 */
+  private volatile boolean serviceStarted;
   private AndroidNativePlaybackPlugin plugin;
   private Bitmap coverBitmap;
   /** 封面 JPEG 编码缓存，仅在 coverBitmap 变化时重压。 */
@@ -102,6 +107,18 @@ public final class PlaybackManager {
   private String apiBaseUrl = "";
   private String cookie = "";
   private String songLevel = "exhigh";
+
+  /**
+   * 当前 promotion 任务 —— load() 时排 10s timer，到期仍是这首歌则把它从 prefetch 升级为
+   * promoted（正式缓存）并启动完整下载（为 automix 做准备）。<br>
+   * 切歌 / stop / cleanup 时通过 {@link #cancelPromotion} 取消。
+   *
+   * <p>volatile：Runnable 末尾在主线程内清 null，而 cancelPromotion 经 synchronized 方法可能从
+   * 其他线程进入读，需跨线程可见性保证。
+   */
+  @Nullable private volatile Runnable pendingPromotionRunnable;
+  /** promotion 触发阈值：用户持续播放 10 秒 → 视为「真的喜欢」。 */
+  private static final long PROMOTE_AFTER_MS = 10_000L;
   /** Java 端 URL 解析器：WebView 冻结时仍可自治取地址。 */
   private final PlaybackUrlResolver urlResolver = new PlaybackUrlResolver();
   private TrackMetadata currentMetadata = new TrackMetadata();
@@ -280,6 +297,7 @@ public final class PlaybackManager {
 
   public synchronized void attachService(PlaybackService playbackService) {
     service = playbackService;
+    serviceStarted = true;
     ensureInitialized();
     updateNotification();
   }
@@ -287,6 +305,7 @@ public final class PlaybackManager {
   public synchronized void detachService(PlaybackService playbackService) {
     if (service == playbackService) {
       service = null;
+      serviceStarted = false;
     }
   }
 
@@ -318,6 +337,29 @@ public final class PlaybackManager {
     remoteMode = false;
     currentSource = url == null ? "" : url;
     currentMetadata.url = currentSource;
+
+    // 取消上一首未到期的 10s promotion timer：用户已切歌，旧任务无意义
+    cancelPromotion();
+
+    // 实际播放：给该 cacheKey 续期 TTL + 排 10s timer 决定是否升级正式缓存
+    if (!currentSource.isEmpty()) {
+      try {
+        android.net.Uri parsed = android.net.Uri.parse(currentSource);
+        String scheme = parsed.getScheme();
+        if (scheme != null && (scheme.equals("http") || scheme.equals("https"))) {
+          final String cacheKey = AudioCacheProvider.resolveCacheKey(parsed);
+          final String sourceSnapshot = currentSource;
+          AudioPrefetchTtlIndex ttlIndex = AudioPrefetchTtlIndex.getInstance(appContext);
+          ttlIndex.markAccess(cacheKey);
+          // 已 promoted 的歌不再排 timer（已是正式缓存，全量下载也已经触发过）
+          if (!ttlIndex.isPromoted(cacheKey)) {
+            schedulePromotion(cacheKey, sourceSnapshot);
+          }
+        }
+      } catch (Throwable e) {
+        // mark 失败不影响播放
+      }
+    }
     clearPendingSeek();
     lastKnownPositionMs = 0L;
 
@@ -367,6 +409,40 @@ public final class PlaybackManager {
     return buildState();
   }
 
+  /**
+   * 排定 promotion timer：10s 后若仍是这首歌且 ExoPlayer 处于播放态，
+   * 则把 cacheKey 升级为正式缓存 + 启动完整下载（为 automix 铺路）。
+   *
+   * <p>切歌 / stop / cleanup 时通过 {@link #cancelPromotion} 取消未到期的 timer。
+   */
+  private void schedulePromotion(@NonNull String cacheKey, @NonNull String sourceSnapshot) {
+    cancelPromotion(); // 防御性：理论上 load 已调过，二次保险
+    final String urlSnapshot = sourceSnapshot;
+    Runnable r = () -> {
+      // 必须仍在播放且 url 一致才升级 —— 期间用户可能切歌 / 暂停 / 停止
+      synchronized (this) {
+        if (!urlSnapshot.equals(currentSource)) return;
+        if (!player.isPlaying() && !player.getPlayWhenReady()) return;
+      }
+      // 不在此处立即写 promoted 标记：若网络中断，automix 可能读到截断文件。
+      // 改由 AudioCacheProvider.prefetchUrlFull 在 CacheWriter 真正写完整后调 promote()。
+      // 本处仅触发下载，AudioCacheProvider 内部 inFlight + isPromoted 短路保证幂等。
+      AudioCacheProvider.prefetchUrlFull(appContext, urlSnapshot);
+      Log.d(TAG, "promotion scheduled (download starts): " + cacheKey);
+      pendingPromotionRunnable = null;
+    };
+    pendingPromotionRunnable = r;
+    mainHandler.postDelayed(r, PROMOTE_AFTER_MS);
+  }
+
+  /** 取消未到期的 promotion timer。幂等。 */
+  private void cancelPromotion() {
+    if (pendingPromotionRunnable != null) {
+      mainHandler.removeCallbacks(pendingPromotionRunnable);
+      pendingPromotionRunnable = null;
+    }
+  }
+
   /** 硬清理：清播放列表 / 登入登出等场景，清空 MediaItem、通知栏、queuedNext 及快路径锁。 */
   public synchronized JSObject cleanup() {
     ensureInitialized();
@@ -375,6 +451,7 @@ public final class PlaybackManager {
     player.stop();
     player.clearMediaItems();
     currentSource = "";
+    cancelPromotion();
     clearPendingSeek();
     lastKnownPositionMs = 0L;
     playbackQueue.replace(null, -1, PlaybackQueue.RepeatMode.OFF, false, false, false);
@@ -743,13 +820,19 @@ public final class PlaybackManager {
           }
         };
 
-    player = new ExoPlayer.Builder(appContext, renderersFactory)
-        .setMediaSourceFactory(
-            new DefaultMediaSourceFactory(
-                appContext,
+    // 远端音频走 SimpleCache：第二次播放同一首歌直接读 cacheDir/exo/，无网络请求；
+    // 本地 file:// / content:// 走默认 DataSource。CacheDataSource 仅对 http(s) 起作用。
+    androidx.media3.datasource.DataSource.Factory cachedFactory =
+        AudioCacheProvider.buildCachedDataSourceFactory(appContext);
+    DefaultMediaSourceFactory mediaSourceFactory =
+        new DefaultMediaSourceFactory(
+                cachedFactory,
                 new DefaultExtractorsFactory()
                     .setConstantBitrateSeekingEnabled(true)
-                    .setConstantBitrateSeekingAlwaysEnabled(true)))
+                    .setConstantBitrateSeekingAlwaysEnabled(true));
+
+    player = new ExoPlayer.Builder(appContext, renderersFactory)
+        .setMediaSourceFactory(mediaSourceFactory)
         .build();
     player.setAudioAttributes(
         new AudioAttributes.Builder()
@@ -917,7 +1000,17 @@ public final class PlaybackManager {
     return null;
   }
 
+  /**
+   * 启动 PlaybackService 前台服务。
+   *
+   * 节流：已 attach（onCreate 已跑过）直接返回，避免每次 load/play/syncRemoteState
+   * 都重复触发 startForegroundService —— 这会让系统 Binder 走一遭、FGS 通知重建，
+   * 在频繁 seek/切歌时表现为通知抖动 + 多次 "Background started FGS" 日志。
+   */
   private void ensureServiceRunning() {
+    if (serviceStarted && service != null) {
+      return;
+    }
     Intent intent = new Intent(appContext, PlaybackService.class);
     ContextCompat.startForegroundService(appContext, intent);
   }

@@ -22,6 +22,7 @@ import java.util.List;
 import java.util.function.Supplier;
 import org.json.JSONException;
 import org.json.JSONObject;
+import top.imsyy.splayer.android.cache.AudioCacheProvider;
 
 @CapacitorPlugin(
     name = "AndroidNativePlayback",
@@ -379,6 +380,25 @@ public class AndroidNativePlaybackPlugin extends Plugin {
   }
 
   // 频谱可视化 Media3 AudioProcessor 内嵌 FFT
+
+  /**
+   * 预下载下一首音频前 512 KB 到 SimpleCache。
+   *
+   * <p>调用方（SongManager.prefetchNextSong）拿到下一首 url 后立即 fire-and-forget。
+   * 切歌后 ExoPlayer setMediaItem 命中缓存，跳过 100-500ms 的 OPEN→网络握手。
+   *
+   * <p>同 cacheKey 的并发请求会被 dedup；切歌时上一首未完成的 prefetch 会被自动取消让带宽。
+   */
+  @PluginMethod
+  public void prefetchAudio(PluginCall call) {
+    String url = call.getString("url", "");
+    if (url == null || url.isEmpty()) {
+      call.resolve();
+      return;
+    }
+    AudioCacheProvider.prefetchUrl(getContext(), url);
+    call.resolve();
+  }
 
   @PluginMethod
   public void enableVisualizer(PluginCall call) {

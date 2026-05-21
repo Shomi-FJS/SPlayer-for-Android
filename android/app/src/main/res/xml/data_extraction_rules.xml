@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 12+ (API 31+) 备份/迁移规则：缓存与外部缓存均排除 -->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="cache" />
+        <exclude domain="external_cache" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="cache" />
+        <exclude domain="external_cache" />
+    </device-transfer>
+</data-extraction-rules>

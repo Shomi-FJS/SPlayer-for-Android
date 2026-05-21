@@ -220,6 +220,11 @@ export interface AndroidNativePlaybackPlugin {
    * 关闭时 Java 端 listener=null 直接跳过 FFT 计算，CPU 占用归零。
    */
   enableVisualizer(options: { enable: boolean }): Promise<AndroidNativePermissionResult>;
+  /**
+   * 预下载音频前 512 KB 到 ExoPlayer SimpleCache。fire-and-forget，立即 resolve。
+   * 同 url 并发去重；切歌时未完成的预下载会自动取消让带宽。
+   */
+  prefetchAudio(options: { url: string }): Promise<void>;
   addListener(
     eventName: "playbackStateChanged",
     listenerFunc: (event: AndroidNativePlaybackStateEvent) => void,

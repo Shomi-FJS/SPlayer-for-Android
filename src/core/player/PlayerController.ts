@@ -6,14 +6,12 @@ import type { RepeatModeType, ShuffleModeType } from "@/types/shared/play-mode";
 import { type AudioAnalysis } from "@/types/audio/automix";
 import { calculateLyricIndex } from "@/utils/calc";
 import { getCoverColor } from "@/utils/color";
-import { EMBEDDED_API_BASE_URL } from "@/utils/embeddedApi";
 import { isCapacitorAndroid, isElectron, isMac } from "@/utils/env";
 import { getPlayerInfoObj, getPlaySongData } from "@/utils/format";
 import { handleSongQuality, shuffleArray, sleep } from "@/utils/helper";
 import lastfmScrobbler from "@/utils/lastfmScrobbler";
 import { DJ_MODE_KEYWORDS } from "@/utils/meta";
 import { calculateProgress } from "@/utils/time";
-import { getCookie } from "@/utils/cookie";
 import type { LyricLine } from "@applemusic-like-lyrics/lyric";
 import { type DebouncedFunc, throttle } from "lodash-es";
 import {
@@ -618,9 +616,19 @@ class PlayerController {
     }
 
     // 预载下一首：fire-and-forget，让 playLoading=false 不被网络请求阻塞 1-3s
-    // syncAndroidPlaybackContext 内部会做 prefetchNextSong（网络）+ 多次 IPC，
-    // 这些都不应该卡住 loading 转圈的消失时机，让后续 UI 流程立即继续。
-    void this.syncAndroidPlaybackContext(song);
+    // syncAndroidPlaybackContext 内部 buildAndroidWindowTracks 同步遍历 41 首歌（5-30ms），
+    // 后续 4 个 Capacitor IPC 累计 100-300ms。这些都不应卡在切歌热路径上，
+    // 推到 idle frame 让 UI 把切歌动画 / 歌词加载先跑完，再幕后做队列同步。
+    // Java 触发的 applyNativeTrackChanged / refreshAndroidQueueWindow 等仍走立即路径。
+    const ric = (
+      window as Window & { requestIdleCallback?: typeof requestIdleCallback }
+    ).requestIdleCallback;
+    const runSync = () => void this.syncAndroidPlaybackContext(song);
+    if (typeof ric === "function") {
+      ric(runSync, { timeout: 500 });
+    } else {
+      setTimeout(runSync, 0);
+    }
     if (settingStore.useNextPrefetch) songManager.prefetchNextSong();
 
     // Last.fm Scrobbler
@@ -783,14 +791,6 @@ class PlayerController {
 
     if (!song) return;
 
-    const musicCookie = getCookie("MUSIC_U");
-
-    await AndroidNativePlayback.syncApiContext({
-      apiBaseUrl: EMBEDDED_API_BASE_URL,
-      cookie: musicCookie ? `MUSIC_U=${musicCookie};os=pc;` : "",
-      songLevel: settingStore.songLevel,
-    });
-
     // 推 ±N 窗口给 Java 自治处理 ENDED/NEXT/PREVIOUS，脱离 WebView 后台冻结
     let windowResult: {
       windowTracks: AndroidNativeWindowTrack[];
@@ -812,25 +812,29 @@ class PlayerController {
       };
     }
 
-    await AndroidNativePlayback.updateQueueContext({
-      liked: typeof song.id === "number" ? dataStore.isLikeSong(song.id) : false,
-      canSkipPrevious: !statusStore.personalFmMode,
-      personalFmMode: statusStore.personalFmMode,
-      controllerEnabled: settingStore.androidMediaControllerEnabled,
-      desktopLyricButtonEnabled: settingStore.androidMediaControllerDesktopLyricEnabled,
-      desktopLyricEnabled: statusStore.showDesktopLyric,
-      ...windowResult,
-      windowRefilled: options?.windowRefilled === true,
-    });
-
-    await AndroidNativePlayback.updateNotificationPrefs({
-      controllerEnabled: settingStore.androidMediaControllerEnabled,
-      desktopLyricButtonEnabled: settingStore.androidMediaControllerDesktopLyricEnabled,
-    });
-
-    await AndroidNativePlayback.setAllowMixWithOthers({
-      allow: settingStore.androidAllowMixWithOthers,
-    });
+    // 4 次 IPC 并发：之前串行累计 30-150ms × 4 = 200-600ms 主线程 microtask 排队，
+    // 改为 Promise.all 后单次切歌仅排队 30-150ms。
+    // syncApiContext 通过 mediaSessionManager 共享 dedup（参数无变化时跳过实际 IPC）。
+    await Promise.all([
+      mediaSessionManager.syncAndroidApiContext(),
+      AndroidNativePlayback.updateQueueContext({
+        liked: typeof song.id === "number" ? dataStore.isLikeSong(song.id) : false,
+        canSkipPrevious: !statusStore.personalFmMode,
+        personalFmMode: statusStore.personalFmMode,
+        controllerEnabled: settingStore.androidMediaControllerEnabled,
+        desktopLyricButtonEnabled: settingStore.androidMediaControllerDesktopLyricEnabled,
+        desktopLyricEnabled: statusStore.showDesktopLyric,
+        ...windowResult,
+        windowRefilled: options?.windowRefilled === true,
+      }),
+      AndroidNativePlayback.updateNotificationPrefs({
+        controllerEnabled: settingStore.androidMediaControllerEnabled,
+        desktopLyricButtonEnabled: settingStore.androidMediaControllerDesktopLyricEnabled,
+      }),
+      AndroidNativePlayback.setAllowMixWithOthers({
+        allow: settingStore.androidAllowMixWithOthers,
+      }),
+    ]);
   }
 
   /**
