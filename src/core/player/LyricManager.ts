@@ -1,4 +1,5 @@
 import { qqMusicMatch } from "@/api/qqmusic";
+import { searchResult, SearchTypes } from "@/api/search";
 import { songLyric, songLyricTTML } from "@/api/song";
 import { keywords as defaultKeywords, regexes as defaultRegexes } from "@/assets/data/exclude";
 import { useCacheManager } from "@/core/resource/CacheManager";
@@ -29,6 +30,35 @@ interface LyricFetchResult {
     usingTTMLLyric: boolean;
     usingQRCLyric: boolean;
   };
+}
+
+interface SearchSongArtist {
+  name?: string;
+}
+
+interface SearchSongAlbum {
+  name?: string;
+}
+
+interface SearchSongCandidate {
+  id?: number;
+  name?: string;
+  ar?: SearchSongArtist[];
+  artists?: SearchSongArtist[];
+  al?: SearchSongAlbum;
+  album?: SearchSongAlbum;
+  dt?: number;
+  duration?: number;
+}
+
+interface ElectronLyricResult {
+  lyric?: string;
+  format?: "lrc" | "ttml" | "yrc";
+}
+
+interface LocalLyricOverrideResult {
+  lrc?: unknown;
+  ttml?: unknown;
 }
 
 /**
@@ -76,6 +106,16 @@ class LyricManager {
    * @param type 缓存类型
    * @returns 缓存数据
    */
+  private getArtistsText(song: SongType): string {
+    return Array.isArray(song.artists)
+      ? song.artists.map((artist) => artist.name).join("/")
+      : String(song.artists || "");
+  }
+
+  private getAlbumText(song: SongType): string {
+    return typeof song.album === "string" ? song.album : song.album?.name || "";
+  }
+
   private async getRawLyricCache(id: number, type: "lrc" | "ttml" | "qrc"): Promise<string | null> {
     const settingStore = useSettingStore();
     const cacheManager = useCacheManager();
@@ -119,9 +159,7 @@ class LyricManager {
    */
   private async fetchQQMusicLyric(song: SongType): Promise<SongLyric | null> {
     // 构建歌手字符串
-    const artistsStr = Array.isArray(song.artists)
-      ? song.artists.map((a) => a.name).join("/")
-      : String(song.artists || "");
+    const artistsStr = this.getArtistsText(song);
     // 判断本地/在线，生成缓存 key
     const isLocal = Boolean(song.path);
     const cacheKey = isLocal ? `local_${song.id}` : String(song.id);
@@ -208,6 +246,71 @@ class LyricManager {
     if (!result.lrcData.length && !result.yrcData.length) {
       return null;
     }
+    return result;
+  }
+
+  private async findOnlineSongIdForLocal(song: SongType): Promise<number | null> {
+    const artistsText = this.getArtistsText(song);
+    const keyword = artistsText ? `${song.name} ${artistsText}` : song.name;
+    try {
+      const response = await searchResult(keyword, 5, 0, SearchTypes.Single);
+      const songs = response?.result?.songs as SearchSongCandidate[] | undefined;
+      if (!Array.isArray(songs)) return null;
+      const normalize = (value: string) =>
+        value
+          .toLowerCase()
+          .replace(/[（(].*?[）)]/g, "")
+          .replace(/\s+/g, "")
+          .trim();
+      const targetName = normalize(song.name || "");
+      const targetArtists = normalize(artistsText);
+      const targetAlbum = normalize(this.getAlbumText(song));
+      const duration = Number(song.duration || 0);
+      const sorted = songs
+        .map((candidate) => {
+          const candidateName = normalize(candidate.name || "");
+          const candidateArtists = normalize(
+            Array.isArray(candidate.ar)
+              ? candidate.ar.map((artist) => artist?.name).join("/")
+              : Array.isArray(candidate.artists)
+                ? candidate.artists.map((artist) => artist?.name).join("/")
+                : "",
+          );
+          const candidateAlbum = normalize(candidate.al?.name || candidate.album?.name || "");
+          const candidateDuration = Number(candidate.dt || candidate.duration || 0);
+          let score = 0;
+          if (candidateName === targetName) score += 5;
+          else if (candidateName.includes(targetName) || targetName.includes(candidateName)) {
+            score += 2;
+          }
+          if (targetArtists && candidateArtists.includes(targetArtists)) score += 4;
+          else if (targetArtists && targetArtists.includes(candidateArtists)) score += 2;
+          if (targetAlbum && candidateAlbum === targetAlbum) score += 2;
+          if (duration > 0 && candidateDuration > 0) {
+            const diff = Math.abs(candidateDuration - duration);
+            if (diff <= 3000) score += 3;
+            else if (diff > 8000) score -= 4;
+          }
+          return { id: candidate.id, score };
+        })
+        .filter((candidate): candidate is { id: number; score: number } =>
+          typeof candidate.id === "number",
+        )
+        .sort((a, b) => b.score - a.score);
+      const best = sorted[0];
+      return best && best.score >= 5 ? best.id : null;
+    } catch (error) {
+      console.warn("本地歌曲在线歌词匹配失败:", error);
+      return null;
+    }
+  }
+
+  private async fetchMatchedOnlineLyricForLocal(song: SongType): Promise<LyricFetchResult | null> {
+    const onlineId = await this.findOnlineSongIdForLocal(song);
+    if (!onlineId) return null;
+    const matchedSong: SongType = { ...song, id: onlineId, path: undefined };
+    const result = await this.fetchOnlineLyric(matchedSong);
+    if (!result.data.lrcData.length && !result.data.yrcData.length) return null;
     return result;
   }
 
@@ -460,7 +563,9 @@ class LyricManager {
           // sidecar 查找失败，继续后续流程
         }
 
-        // 无本地歌词，尝试在线 QQ 匹配
+        // 无本地歌词，尝试在线匹配
+        const matchedOnline = await this.fetchMatchedOnlineLyricForLocal(song);
+        if (matchedOnline) return matchedOnline;
         if (settingStore.localLyricQQMusicMatch && song) {
           const qqLyric = await this.fetchQQMusicLyric(song);
           if (qqLyric && (qqLyric.lrcData.length > 0 || qqLyric.yrcData.length > 0)) {
@@ -474,9 +579,16 @@ class LyricManager {
       }
 
       // Electron 端：使用原有 IPC 逻辑
-      const { lyric, format }: { lyric?: string; format?: "lrc" | "ttml" | "yrc" } =
-        await window.electron.ipcRenderer.invoke("get-music-lyric", song.path);
-      if (!lyric) return defaultResult;
+      const electron = window.electron;
+      if (!electron) return defaultResult;
+      const { lyric, format } = await electron.ipcRenderer.invoke<ElectronLyricResult>(
+        "get-music-lyric",
+        song.path,
+      );
+      if (!lyric) {
+        const matchedOnline = await this.fetchMatchedOnlineLyricForLocal(song);
+        return matchedOnline || defaultResult;
+      }
       // YRC 直接解析
       if (format === "yrc") {
         let lines: LyricLine[] = [];
@@ -558,7 +670,9 @@ class LyricManager {
 
       const lyricDirs = Array.isArray(localLyricPath) ? localLyricPath.map((p) => String(p)) : [];
       // 读取本地歌词
-      const { lrc, ttml } = await window.electron.ipcRenderer.invoke(
+      const electron = window.electron;
+      if (!electron) return defaultResult;
+      const { lrc, ttml } = await electron.ipcRenderer.invoke<LocalLyricOverrideResult>(
         "read-local-lyric",
         lyricDirs,
         id,
@@ -861,8 +975,9 @@ class LyricManager {
       // 仅更新加载状态，不更新歌词数据
       statusStore.lyricLoading = false;
       // 单曲循环时，歌词数据未变，需通知桌面歌词取消加载状态
-      if (isElectron) {
-        window.electron.ipcRenderer.send("desktop-lyric:update-data", {
+      const electron = window.electron;
+      if (isElectron && electron) {
+        electron.ipcRenderer.send("desktop-lyric:update-data", {
           lyricLoading: false,
         });
       }

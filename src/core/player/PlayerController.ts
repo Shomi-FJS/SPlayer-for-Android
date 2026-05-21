@@ -987,6 +987,8 @@ class PlayerController {
       if (musicStore.playSong.type === "streaming") return;
       // Android: 没有 Electron IPC，跳过封面/元数据 IPC，仅做媒体会话刷新
       if (typeof window === "undefined" || !window.electron?.ipcRenderer) {
+        const statusStore = useStatusStore();
+        statusStore.songQuality = musicStore.playSong.quality;
         getCoverColor(musicStore.playSong.cover);
         mediaSessionManager.updateMetadata();
         await this.syncAndroidPlaybackContext(musicStore.playSong);

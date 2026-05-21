@@ -109,7 +109,7 @@ const containerHeightStyle = computed(() => {
 // 实际使用的容器高度数值
 const viewportHeight = computed(() => {
   if (typeof props.height === "number") return props.height;
-  return containerHeight.value || 0;
+  return containerHeight.value || window.innerHeight;
 });
 
 // 初始化高度数组

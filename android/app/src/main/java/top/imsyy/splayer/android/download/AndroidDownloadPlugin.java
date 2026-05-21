@@ -4,9 +4,12 @@ import android.app.DownloadManager;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.database.Cursor;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.media.MediaMetadataRetriever;
 import android.net.Uri;
 import android.os.Environment;
+import android.util.Base64;
 import androidx.activity.result.ActivityResult;
 import androidx.annotation.Nullable;
 import androidx.documentfile.provider.DocumentFile;
@@ -19,6 +22,7 @@ import com.getcapacitor.annotation.CapacitorPlugin;
 import com.getcapacitor.annotation.ActivityCallback;
 import android.content.Intent;
 import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -416,6 +420,8 @@ public class AndroidDownloadPlugin extends Plugin {
     String artist = fallbackArtist;
     String album = "未知专辑";
     long duration = 0L;
+    long bitrate = 0L;
+    String cover = "";
 
     // 尝试用 MediaMetadataRetriever 读取标签信息
     MediaMetadataRetriever retriever = null;
@@ -427,6 +433,7 @@ public class AndroidDownloadPlugin extends Plugin {
       String mArtist = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST);
       String mAlbum = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUM);
       String mDuration = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION);
+      String mBitrate = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_BITRATE);
 
       if (mTitle != null && !mTitle.trim().isEmpty()) title = mTitle.trim();
       if (mArtist != null && !mArtist.trim().isEmpty()) artist = mArtist.trim();
@@ -435,6 +442,34 @@ public class AndroidDownloadPlugin extends Plugin {
         try {
           duration = Long.parseLong(mDuration);
         } catch (NumberFormatException ignored) {
+        }
+      }
+      if (mBitrate != null) {
+        try {
+          bitrate = Long.parseLong(mBitrate);
+        } catch (NumberFormatException ignored) {
+        }
+      }
+
+      // 提取嵌入封面并压缩为 base64 data URL
+      byte[] embeddedPicture = retriever.getEmbeddedPicture();
+      if (embeddedPicture != null) {
+        Bitmap original = BitmapFactory.decodeByteArray(embeddedPicture, 0, embeddedPicture.length);
+        if (original != null) {
+          int maxSize = 300;
+          int w = original.getWidth();
+          int h = original.getHeight();
+          float scale = Math.min((float) maxSize / w, (float) maxSize / h);
+          Bitmap scaled = original;
+          if (scale < 1.0f) {
+            scaled = Bitmap.createScaledBitmap(original, Math.round(w * scale), Math.round(h * scale), true);
+          }
+          ByteArrayOutputStream baos = new ByteArrayOutputStream();
+          scaled.compress(Bitmap.CompressFormat.JPEG, 80, baos);
+          String base64 = Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP);
+          cover = "data:image/jpeg;base64," + base64;
+          if (scaled != original) scaled.recycle();
+          original.recycle();
         }
       }
     } catch (Exception ignored) {
@@ -458,10 +493,12 @@ public class AndroidDownloadPlugin extends Plugin {
     song.put("album", album);
     song.put("duration", duration);
     song.put("size", size);
+    song.put("quality", bitrate);
     song.put("path", uri);
     song.put("fileName", fileName);
     song.put("ext", extension);
     song.put("lastModified", lastModified);
+    song.put("cover", cover);
     return song;
   }
 

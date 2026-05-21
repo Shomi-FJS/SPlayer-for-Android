@@ -464,8 +464,13 @@ class SongManager {
     // 本地文件直接返回
     if (song.path && song.type !== "streaming") {
       // Android SAF URI 直接交给 ExoPlayer，无需 file:// 前缀
-      if (song.path.startsWith("content://")) {
-        return { id: song.id, url: song.path, source: "local" };
+      if (isCapacitorAndroid) {
+        if (song.path.startsWith("content://")) {
+          return { id: song.id, url: song.path, quality: song.quality, source: "local" };
+        }
+        if (song.path.startsWith("file://")) {
+          return { id: song.id, url: song.path, quality: song.quality, source: "local" };
+        }
       }
       // 检查本地文件是否存在
       const result = await window.electron.ipcRenderer.invoke("file-exists", song.path);
@@ -475,7 +480,7 @@ class SongManager {
         return { id: song.id, url: undefined };
       }
       const encodedPath = song.path.replace(/#/g, "%23").replace(/\?/g, "%3F");
-      return { id: song.id, url: `file://${encodedPath}`, source: "local" };
+      return { id: song.id, url: `file://${encodedPath}`, quality: song.quality, source: "local" };
     }
 
     // Stream songs (Subsonic / Jellyfin)

@@ -4,6 +4,7 @@ import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
+import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
 import android.graphics.Bitmap;
@@ -18,6 +19,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.PowerManager;
+import android.util.Base64;
 import android.util.Log;
 import android.view.KeyEvent;
 import androidx.annotation.NonNull;
@@ -1018,10 +1020,25 @@ public final class PlaybackManager {
   private MediaItem buildMediaItem(String url) {
     MediaItem.Builder builder = new MediaItem.Builder();
     if (url != null && !url.isEmpty()) {
-      builder.setUri(Uri.parse(url));
+      Uri uri = Uri.parse(url);
+      builder.setUri(uri);
+      if ("content".equals(uri.getScheme())) {
+        builder.setMimeType(resolveContentMimeType(uri));
+      }
     }
     builder.setMediaMetadata(buildMediaMetadata());
     return builder.build();
+  }
+
+  @Nullable
+  private String resolveContentMimeType(Uri uri) {
+    try {
+      ContentResolver resolver = appContext.getContentResolver();
+      return resolver.getType(uri);
+    } catch (Exception error) {
+      Log.w(TAG, "resolveContentMimeType failed", error);
+      return null;
+    }
   }
 
   private MediaMetadata buildMediaMetadata() {
@@ -1777,7 +1794,15 @@ public final class PlaybackManager {
           HttpURLConnection connection = null;
 
           try {
-            if (coverUrl.startsWith("http://") || coverUrl.startsWith("https://")) {
+            if (coverUrl.startsWith("data:")) {
+              // base64 data URL
+              int commaIdx = coverUrl.indexOf(',');
+              if (commaIdx > 0) {
+                String base64Data = coverUrl.substring(commaIdx + 1);
+                byte[] decoded = Base64.decode(base64Data, Base64.DEFAULT);
+                bitmap = BitmapFactory.decodeByteArray(decoded, 0, decoded.length);
+              }
+            } else if (coverUrl.startsWith("http://") || coverUrl.startsWith("https://")) {
               connection = (HttpURLConnection) new URL(coverUrl).openConnection();
               connection.setConnectTimeout(8000);
               connection.setReadTimeout(8000);
@@ -1785,6 +1810,12 @@ public final class PlaybackManager {
               connection.connect();
               inputStream = connection.getInputStream();
               bitmap = BitmapFactory.decodeStream(inputStream);
+            } else if (coverUrl.startsWith("content://")) {
+              ContentResolver resolver = appContext.getContentResolver();
+              inputStream = resolver.openInputStream(Uri.parse(coverUrl));
+              if (inputStream != null) {
+                bitmap = BitmapFactory.decodeStream(inputStream);
+              }
             } else if (coverUrl.startsWith("file://")) {
               bitmap = BitmapFactory.decodeFile(Uri.parse(coverUrl).getPath());
             }

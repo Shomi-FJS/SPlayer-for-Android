@@ -5,10 +5,15 @@ import android.net.Uri;
 import android.util.Log;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
+import androidx.media3.common.C;
 import androidx.media3.database.StandaloneDatabaseProvider;
+import androidx.media3.datasource.ContentDataSource;
 import androidx.media3.datasource.DataSource;
 import androidx.media3.datasource.DataSpec;
+import androidx.media3.datasource.DefaultDataSource;
 import androidx.media3.datasource.DefaultHttpDataSource;
+import androidx.media3.datasource.FileDataSource;
+import androidx.media3.datasource.TransferListener;
 import androidx.media3.datasource.cache.CacheDataSink;
 import androidx.media3.datasource.cache.CacheDataSource;
 import androidx.media3.datasource.cache.CacheSpan;
@@ -105,12 +110,22 @@ public final class AudioCacheProvider {
   public static DataSource.Factory buildCachedDataSourceFactory(@NonNull Context appContext) {
     SimpleCache cache = getOrCreate(appContext);
 
-    DataSource.Factory upstreamFactory =
+    DataSource.Factory httpFactory =
         new DefaultHttpDataSource.Factory()
             .setAllowCrossProtocolRedirects(true)
             .setConnectTimeoutMs(15_000)
             .setReadTimeoutMs(15_000)
             .setUserAgent("SPlayer-Android/1.0");
+
+    DataSource.Factory upstreamFactory =
+        () ->
+            new DefaultDataSource(
+                appContext,
+                new LocalBypassDataSource(
+                    appContext,
+                    httpFactory.createDataSource(),
+                    new FileDataSource(),
+                    new ContentDataSource(appContext)));
 
     // 写入器：把 upstream 拉到的字节落到 SimpleCache。fragmentSize=MAX 让单首歌只产生 1 个文件
     CacheDataSink.Factory cacheSinkFactory =
@@ -124,6 +139,78 @@ public final class AudioCacheProvider {
         .setFlags(
             CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR
                 | CacheDataSource.FLAG_BLOCK_ON_CACHE);
+  }
+
+  private static final class LocalBypassDataSource extends DataSourceWrapper {
+    private final DataSource httpDataSource;
+    private final DataSource fileDataSource;
+    private final DataSource contentDataSource;
+
+    LocalBypassDataSource(
+        @NonNull Context context,
+        @NonNull DataSource httpDataSource,
+        @NonNull DataSource fileDataSource,
+        @NonNull DataSource contentDataSource) {
+      super(httpDataSource);
+      this.httpDataSource = httpDataSource;
+      this.fileDataSource = fileDataSource;
+      this.contentDataSource = contentDataSource;
+    }
+
+    @Override
+    protected DataSource getDataSource(@NonNull DataSpec dataSpec) {
+      String scheme = dataSpec.uri.getScheme();
+      if ("file".equals(scheme)) return fileDataSource;
+      if ("content".equals(scheme)) return contentDataSource;
+      return httpDataSource;
+    }
+  }
+
+  abstract static class DataSourceWrapper implements DataSource {
+    private final DataSource defaultDataSource;
+    @Nullable private DataSource currentDataSource;
+
+    DataSourceWrapper(@NonNull DataSource defaultDataSource) {
+      this.defaultDataSource = defaultDataSource;
+    }
+
+    @Override
+    public void addTransferListener(@NonNull TransferListener transferListener) {
+      defaultDataSource.addTransferListener(transferListener);
+      currentDataSource = defaultDataSource;
+    }
+
+    @Override
+    public long open(@NonNull DataSpec dataSpec) throws java.io.IOException {
+      currentDataSource = getDataSource(dataSpec);
+      return currentDataSource.open(dataSpec);
+    }
+
+    @Override
+    public int read(@NonNull byte[] buffer, int offset, int length) throws java.io.IOException {
+      if (currentDataSource == null) return C.RESULT_END_OF_INPUT;
+      return currentDataSource.read(buffer, offset, length);
+    }
+
+    @Nullable
+    @Override
+    public Uri getUri() {
+      return currentDataSource == null ? null : currentDataSource.getUri();
+    }
+
+    @Override
+    public void close() throws java.io.IOException {
+      if (currentDataSource != null) {
+        try {
+          currentDataSource.close();
+        } finally {
+          currentDataSource = null;
+        }
+      }
+    }
+
+    @NonNull
+    protected abstract DataSource getDataSource(@NonNull DataSpec dataSpec);
   }
 
   /** 已知的临时签名 / 过期参数：仅这些会被剔除以保证同曲目缓存命中。其余 query 参与 key 防碰撞。 */
