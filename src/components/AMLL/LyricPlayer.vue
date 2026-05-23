@@ -195,17 +195,274 @@ type InternalLyricLineObject = {
   enable?: (time?: number, shouldPlay?: boolean) => void | Promise<void>;
 };
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type AnyInternal = any;
+
 type InternalLyricPlayer = CoreLyricPlayer & {
   hotLines?: Set<number>;
   bufferedLines?: Set<number>;
   processedLines?: LyricLine[];
   currentLyricLineObjects?: InternalLyricLineObject[];
+  currentLyricGroups?: AnyInternal[];
   scrollToIndex?: number;
   resetScroll?: () => void;
   calcLayout?: () => void | Promise<void>;
 };
 
-const getInternalPlayer = () => playerRef.value as InternalLyricPlayer | undefined;
+const getInternalPlayer = () =>
+  playerRef.value as unknown as InternalLyricPlayer | undefined;
+
+// ─── 性能补丁: 逐属性独立写+dedup,消除 setAttribute 解析开销 ───
+const applyPerformancePatches = (player: InternalLyricPlayer) => {
+  const groups = player.currentLyricGroups;
+  if (!groups || groups.length === 0) return;
+
+  const groupProto = Object.getPrototypeOf(groups[0]);
+  if (groupProto?.__spaPerf) return;
+  groupProto.__spaPerf = true;
+  const lineProto = groups[0].mainLine
+    ? Object.getPrototypeOf(groups[0].mainLine)
+    : null;
+
+  // Patch 1: LyricLineGroup.prototype.renderStyles — 逐属性独立 dedup + bgWrapper 内联
+  // 上浮场景: 仅 transform 变化,opacity/filter 不变 → 省 2/3 DOM 写入
+  // bgWrapper: 内联渲染逻辑 + clientHeight 缓存(消除 layout thrash)
+  if (groupProto && typeof groupProto.renderStyles === "function") {
+    const origRenderStyles = groupProto.renderStyles;
+    groupProto.renderStyles = function (this: AnyInternal) {
+      // 元素重建 → 设 will-change 提升合成层 + 失效缓存
+      if (this.__cachedEl !== this.element) {
+        this.__cachedEl = this.element;
+        this.__lastY = this.__lastOpacity = this.__lastBlur = undefined;
+        this.element.style.willChange = "transform, opacity, filter";
+        this.element.style.contain = "layout style";
+      }
+
+      // 逐属性 dedup: 只写实际变化的属性
+      const y = this.posY.getCurrentPosition().toFixed(1) as string;
+      if (y !== this.__lastY) {
+        this.__lastY = y;
+        this.element.style.transform = `translateY(${y}px)`;
+      }
+
+      const opacity = this.opacity?.toString() ?? "1";
+      if (opacity !== this.__lastOpacity) {
+        this.__lastOpacity = opacity;
+        this.element.style.opacity = opacity;
+      }
+
+      const blurVal = Math.min(5, this.blur ?? 0);
+      const blurStr = `blur(${blurVal}px)`;
+      if (blurStr !== this.__lastBlur) {
+        this.__lastBlur = blurStr;
+        this.element.style.filter = blurStr;
+      }
+
+      if (!this.lyricPlayer.getEnableSpring()) {
+        this.element.style.transitionDelay = `${this.delay}ms`;
+      }
+
+      // bgWrapper: active 变更走原方法(处理 classList),稳态走 dedup
+      if (this.bgWrapper) {
+        if (this.lastIsActive !== this.isActive) {
+          // active 状态变更: 委托原方法处理 classList toggle + 缓存高度
+          origRenderStyles.call(this);
+          this.__bgHeight = this.bgWrapper.clientHeight || 0;
+          this.__lastBgTransform = undefined;
+        } else {
+          // 稳态: dedup bgWrapper transform + marginTop
+          const slideY = this.bgSlideY.getCurrentPosition();
+          const slideYStr = slideY.toFixed(1);
+          const activeProgress = Math.max(0, Math.min(1, 1 - Math.abs(slideY) / 80));
+          const scaleStr = (0.8 + activeProgress * 0.2).toFixed(3);
+          const bgTransform = `translateY(${slideYStr}%) scale(${scaleStr})`;
+          if (bgTransform !== this.__lastBgTransform) {
+            this.__lastBgTransform = bgTransform;
+            this.bgWrapper.style.transform = bgTransform;
+          }
+          // marginTop: 用缓存高度避免 clientHeight layout thrash
+          const shouldBgFirst =
+            !this.lyricPlayer.getAlwaysPostpositionBackground() && this.isBgFirst;
+          if (shouldBgFirst) {
+            const h = this.__bgHeight ?? 0;
+            const mt = `${(-h * (1 - activeProgress)).toFixed(1)}px`;
+            if (mt !== this.__lastBgMargin) {
+              this.__lastBgMargin = mt;
+              this.bgWrapper.style.marginTop = mt;
+            }
+          }
+        }
+      }
+    };
+  }
+
+  // Patch 2: LyricLineEl.prototype.rebuildStyle — 用逐属性写替代 setAttribute("style",...")
+  // 原版 setAttribute 有两大开销: (1) CSS 字符串解析 (2) 清空所有 inline style 含 alpha vars
+  // 改为直接 style.transform / style.filter 写入,彻底消除这两个问题
+  if (lineProto && typeof lineProto.rebuildStyle === "function") {
+    lineProto.rebuildStyle = function (this: AnyInternal) {
+      // 元素重建 → 设 will-change 提升合成层 + 失效缓存
+      if (this.__rsCachedEl !== this.element) {
+        this.__rsCachedEl = this.element;
+        this.__lastScale = this.__lastLineBlur = this.__lastLineDelay = undefined;
+        this.element.style.willChange = "transform, filter";
+        this.element.style.contain = "layout style";
+      }
+
+      const scaleVal = (
+        this.lineTransforms.scale.getCurrentPosition() / 100
+      ).toFixed(4);
+      if (scaleVal !== this.__lastScale) {
+        this.__lastScale = scaleVal;
+        this.element.style.transform = `scale(${scaleVal})`;
+      }
+
+      const blurVal = Math.min(5, this.blur ?? 0);
+      const blurStr = `${blurVal}px`;
+      if (blurStr !== this.__lastLineBlur) {
+        this.__lastLineBlur = blurStr;
+        this.element.style.filter = `blur(${blurStr})`;
+      }
+
+      if (!this.lyricPlayer.getEnableSpring()) {
+        const delayStr = `${this.delay}ms`;
+        if (delayStr !== this.__lastLineDelay) {
+          this.__lastLineDelay = delayStr;
+          this.element.style.transitionDelay = delayStr;
+        }
+      }
+    };
+  }
+
+  // Patch 3: LyricLineEl.prototype.applyAlphaToDom — 缓存 CSS var 字符串避免无变化写入
+  // 由于 Patch 2 不再使用 setAttribute,alpha vars 不会被清空,dedup 完全安全
+  if (lineProto && typeof lineProto.applyAlphaToDom === "function") {
+    lineProto.applyAlphaToDom = function (this: AnyInternal, delta: number) {
+      // 元素重建 → 新元素无 CSS var,失效缓存
+      if (this.__alphaCachedEl !== this.element) {
+        this.__alphaCachedEl = this.element;
+        this.__lastBright = this.__lastDark = undefined;
+      }
+
+      const dt = delta || 0.016;
+      const ATTACK = 50;
+      const RELEASE = 7;
+      const factor = (s: number) => 1 - Math.exp(-s * dt);
+
+      const bf = factor(
+        this.targetBrightAlpha > this.currentBrightAlpha ? ATTACK : RELEASE,
+      );
+      if (Math.abs(this.targetBrightAlpha - this.currentBrightAlpha) < 0.001)
+        this.currentBrightAlpha = this.targetBrightAlpha;
+      else this.currentBrightAlpha += (this.targetBrightAlpha - this.currentBrightAlpha) * bf;
+
+      const df = factor(this.targetDarkAlpha > this.currentDarkAlpha ? ATTACK : RELEASE);
+      if (Math.abs(this.targetDarkAlpha - this.currentDarkAlpha) < 0.001)
+        this.currentDarkAlpha = this.targetDarkAlpha;
+      else this.currentDarkAlpha += (this.targetDarkAlpha - this.currentDarkAlpha) * df;
+
+      const bStr = this.currentBrightAlpha.toFixed(3);
+      const dStr = this.currentDarkAlpha.toFixed(3);
+      if (bStr !== this.__lastBright || dStr !== this.__lastDark) {
+        this.__lastBright = bStr;
+        this.__lastDark = dStr;
+        this.element.style.setProperty("--bright-mask-alpha", bStr);
+        this.element.style.setProperty("--dark-mask-alpha", dStr);
+      }
+    };
+  }
+
+  if (lineProto && typeof lineProto.enable === "function") {
+    const origEnable = lineProto.enable;
+    lineProto.enable = function (
+      this: AnyInternal,
+      maskAnimationTime = this.lyricPlayer.getCurrentTime(),
+      shouldPlay = this.lyricPlayer.getIsPlaying(),
+    ) {
+      const token = `${maskAnimationTime}|${shouldPlay}`;
+      if (this.isEnabled && this.__lastEnableToken === token && this.__lastEnableWords === this.splittedWords) return;
+      this.__lastEnableToken = token;
+      this.__lastEnableWords = this.splittedWords;
+      return origEnable.call(this, maskAnimationTime, shouldPlay);
+    };
+  }
+
+  if (lineProto && typeof lineProto.disable === "function") {
+    const origDisable = lineProto.disable;
+    lineProto.disable = function (this: AnyInternal) {
+      if (!this.isEnabled) return;
+      this.__lastEnableToken = undefined;
+      this.__lastEnableWords = undefined;
+      return origDisable.call(this);
+    };
+  }
+
+  // Patch 4: DomLyricPlayer.prototype.update — --amll-player-time 作用域限定到活跃行
+  // 原版: 每帧在 player 根元素设置 → 500-1500 个词元素全部触发 style recalc
+  // 优化: 仅在 hotLines 对应的 line element 上设置 → 只有 5-15 个活跃词触发 recalc
+  // 非活跃行继承根元素的冻结值(past: 全露出 / future: 全隐藏),无需每帧重算
+  const playerProto = Object.getPrototypeOf(player);
+  if (
+    playerProto &&
+    !playerProto.__spaUpdatePatched &&
+    typeof playerProto.update === "function" &&
+    !(player as AnyInternal).supportMaskImage
+  ) {
+    playerProto.__spaUpdatePatched = true;
+    playerProto.update = function (this: AnyInternal, delta = 0) {
+      if (!this.timelineState?.initialLayoutFinished) return;
+      // 调用 LyricPlayerBase.update (super.update via 祖父原型)
+      const baseProto = Object.getPrototypeOf(playerProto);
+      if (baseProto?.update) baseProto.update.call(this, delta);
+
+      // 将 --amll-player-time 写在活跃行 element 而非根 element
+      const timeStr = `${this.timelineState.currentTime}`;
+      const groups: AnyInternal[] = this.currentLyricGroups;
+
+      // seek 检测: 一次性给所有行写入,确保 past 行显示为已揭示
+      if (this.timelineState.isSeeking && groups) {
+        for (const g of groups) {
+          const mainEl = g.mainLine?.element;
+          if (mainEl) mainEl.style.setProperty("--amll-player-time", timeStr);
+          const bgEl = g.bgLine?.element;
+          if (bgEl) bgEl.style.setProperty("--amll-player-time", timeStr);
+        }
+      } else {
+        // 正常播放: 仅更新 hotGroups(活跃行)
+        const hot: Set<number> | undefined = this.timelineState?.hotGroups;
+        if (hot && groups) {
+          for (const idx of hot) {
+            const g = groups[idx];
+            if (!g) continue;
+            const mainEl = g.mainLine?.element;
+            if (mainEl) mainEl.style.setProperty("--amll-player-time", timeStr);
+            const bgEl = g.bgLine?.element;
+            if (bgEl) bgEl.style.setProperty("--amll-player-time", timeStr);
+          }
+        }
+      }
+
+      if (!this.isPageVisible) return;
+      const deltaS = delta / 1e3;
+      const updateIndices = (this.__spaUpdateIndices ??= new Set<number>());
+      updateIndices.clear();
+      const addNearbyGroups = (center: number | undefined, radius: number) => {
+        if (typeof center !== "number" || !Number.isFinite(center) || !groups) return;
+        const start = Math.max(0, center - radius);
+        const end = Math.min(groups.length - 1, center + radius);
+        for (let i = start; i <= end; i += 1) updateIndices.add(i);
+      };
+      for (let i = 0; i < (groups?.length ?? 0); i += 1) {
+        if (groups[i]?.element?.parentElement) updateIndices.add(i);
+      }
+      for (const idx of this.timelineState?.hotGroups ?? []) addNearbyGroups(idx, 3);
+      for (const idx of this.timelineState?.bufferedGroups ?? []) addNearbyGroups(idx, 5);
+      addNearbyGroups(this.timelineState?.scrollToIndex, 8);
+      for (const idx of updateIndices) groups?.[idx]?.update(deltaS);
+    };
+  }
+
+};
 
 // 补齐新激活行的动画时间
 const syncNewHotLineAnimations = (
@@ -385,6 +642,8 @@ watch(
       // 异步窗口可能跨过组件销毁，二次校验 player 仍然存在
       if (!playerRef.value) return;
       playerRef.value.setLyricLines(lines);
+      // 首次有歌词行时应用性能补丁
+      applyPerformancePatches(getInternalPlayer()!);
       syncSeekTime(props.currentTime);
     };
     // 空数组（切歌瞬间清空）走同步：不会卡且能立即让 LoadingSpinner 显出
