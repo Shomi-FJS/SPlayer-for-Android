@@ -38,6 +38,7 @@ interface SearchSongArtist {
 
 interface SearchSongAlbum {
   name?: string;
+  picUrl?: string;
 }
 
 interface SearchSongCandidate {
@@ -1083,28 +1084,25 @@ class LyricManager {
         line.endTime = line.words[line.words.length - 1].endTime;
       }
     });
+    lines.sort((a, b) => {
+      const startA = Number(a.startTime ?? a.words?.[0]?.startTime ?? 0);
+      const startB = Number(b.startTime ?? b.words?.[0]?.startTime ?? 0);
+      return startA - startB;
+    });
   }
 
   /**
-   * 设置最终歌词
+   * 准备最终歌词数据
    * @param lyricData 歌词数据
-   * @param req 当前歌词请求
+   * @returns 处理后的歌词数据
    */
-  private setFinalLyric(lyricData: SongLyric, req: number) {
-    const musicStore = useMusicStore();
-    const statusStore = useStatusStore();
+  private prepareFinalLyricData(lyricData: SongLyric): SongLyric {
     const settingStore = useSettingStore();
-    // 若非本次
-    if (this.activeLyricReq !== req) return;
-    // 应用括号替换
     lyricData = applyBracketReplacement(lyricData);
     lyricData = applyProfanityUncensor(lyricData, settingStore.uncensorMaskedProfanity);
-    // 规范化时间
     this.normalizeLyricLines(lyricData.yrcData);
     this.normalizeLyricLines(lyricData.lrcData);
-    // 如果只有逐字歌词
     if (lyricData.lrcData.length === 0 && lyricData.yrcData.length > 0) {
-      // 构成普通歌词
       lyricData.lrcData = lyricData.yrcData.map((line) => ({
         ...line,
         words: [
@@ -1117,6 +1115,20 @@ class LyricManager {
         ],
       }));
     }
+    return lyricData;
+  }
+
+  /**
+   * 设置最终歌词
+   * @param lyricData 歌词数据
+   * @param req 当前歌词请求
+   */
+  private setFinalLyric(lyricData: SongLyric, req: number) {
+    const musicStore = useMusicStore();
+    const statusStore = useStatusStore();
+    // 若非本次
+    if (this.activeLyricReq !== req) return;
+    lyricData = this.prepareFinalLyricData(lyricData);
     // 比较新旧歌词数据，如果相同则跳过设置，避免重复重载
     if (this.isLyricDataEqual(musicStore.songLyric, lyricData)) {
       // 仅更新加载状态，不更新歌词数据
@@ -1309,6 +1321,110 @@ class LyricManager {
    */
   public processTtmlForTaskbar(lines: LyricLine[], ttml: string): LyricLine[] {
     return attachTtmlBgLines(ttml, cloneDeep(lines));
+  }
+
+  /**
+   * 通过歌曲名和艺术家查询并加载歌词（用于媒体源）
+   * 多策略搜索：title+artist → title，评分匹配最优结果
+   * 同步更新封面（优先 Android 原生，回退到搜索结果的专辑图）
+   * @param title 歌曲名
+   * @param artist 艺术家名
+   */
+  public async searchAndLoadLyric(title: string, artist: string) {
+    const musicStore = useMusicStore();
+    const statusStore = useStatusStore();
+
+    try {
+      const song = await this.searchBestMediaMatch(title, artist);
+      if (!song || !song.id) {
+        console.warn("[MediaSource] 未找到歌曲:", title, artist);
+        return;
+      }
+
+      // 如果 Android 原生未提供封面，用搜索结果的专辑图兜底
+      if (!musicStore.playSong?.cover) {
+        const coverSrc =
+          song.al?.picUrl || song.album?.picUrl || "";
+        if (coverSrc) {
+          musicStore.playSong = { ...musicStore.playSong, cover: coverSrc, coverSize: undefined };
+        }
+      }
+
+      // 获取歌词
+      const fetchResult = await this.fetchOnlineLyric({
+        id: song.id,
+        name: title,
+        artists: artist,
+        duration: song.dt || song.duration || 0,
+      } as SongType);
+
+      // 应用到 Store
+      const lyricData = this.prepareFinalLyricData(fetchResult.data);
+      statusStore.usingTTMLLyric = fetchResult.meta.usingTTMLLyric;
+      statusStore.usingQRCLyric = fetchResult.meta.usingQRCLyric;
+      musicStore.setSongLyric(lyricData, true);
+      statusStore.lyricLoading = false;
+      statusStore.lyricIndex = -1;
+
+      console.log("[MediaSource] 歌词加载成功:", title, "→", song.name);
+    } catch (error) {
+      console.warn("[MediaSource] 歌词查询失败:", error);
+      musicStore.setSongLyric({ lrcData: [], yrcData: [] }, true);
+    }
+  }
+
+  private async searchBestMediaMatch(
+    title: string,
+    artist: string,
+  ): Promise<SearchSongCandidate | null> {
+    const targetName = LyricManager.normalizeMetadataField(title);
+    const targetArtists = artist ? LyricManager.normalizeMetadataField(artist) : "";
+
+    if (!targetName || targetName.length < 2) return null;
+
+    const strategies = targetArtists
+      ? [`${title} ${artist}`, title]
+      : [title];
+
+    for (const keywords of strategies) {
+      try {
+        const response = await searchResult(keywords, 8, 0, SearchTypes.Single);
+        const songs = response?.result?.songs as SearchSongCandidate[] | undefined;
+        if (!Array.isArray(songs) || songs.length === 0) continue;
+
+        const scored = songs.map((candidate) => {
+          const candidateName = LyricManager.normalizeMetadataField(candidate.name || "");
+          const arList = Array.isArray(candidate.ar) ? candidate.ar : (candidate as any).artists;
+          const candidateArtists = LyricManager.normalizeMetadataField(
+            Array.isArray(arList) ? arList.map((a: any) => a?.name).filter(Boolean).join("/") : "",
+          );
+
+          let score = 0;
+          if (candidateName === targetName) score += 5;
+          else if (candidateName.includes(targetName) || targetName.includes(candidateName))
+            score += 2;
+
+          if (targetArtists && candidateArtists) {
+            if (candidateArtists === targetArtists) score += 4;
+            else if (
+              candidateArtists.includes(targetArtists) ||
+              targetArtists.includes(candidateArtists)
+            )
+              score += 2;
+          }
+
+          return { candidate, score };
+        });
+
+        scored.sort((a, b) => b.score - a.score);
+        const best = scored[0];
+        if (best && best.score >= 5) return best.candidate;
+      } catch {
+        continue;
+      }
+    }
+
+    return null;
   }
 }
 

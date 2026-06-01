@@ -65,8 +65,12 @@ import { isCapacitorAndroid } from "@/utils/env";
 import { lyricLangFontStyle } from "@/utils/lyric/lyricFontConfig";
 import { getFontSize } from "@/utils/style";
 
-defineProps({
+const props = defineProps({
   currentTime: {
+    type: Number,
+    default: 0,
+  },
+  timebaseLead: {
     type: Number,
     default: 0,
   },
@@ -141,7 +145,7 @@ const jumpSeek = (event: LyricLineMouseEvent) => {
   const time = getLineSeekTime(originalLine) ?? getLineSeekTime(eventLine);
   if (time === null) return;
 
-  const offsetMs = statusStore.getSongOffset(musicStore.playSong?.id);
+  const offsetMs = statusStore.getSongOffset(musicStore.playSong?.id) + props.timebaseLead;
   player.setSeek(time - offsetMs);
   player.play();
 };

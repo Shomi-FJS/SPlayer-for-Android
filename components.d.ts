@@ -57,6 +57,7 @@ declare module 'vue' {
     LyricPreview: typeof import('./src/components/Setting/components/LyricPreview.vue')['default']
     MainPlayer: typeof import('./src/components/Player/MainPlayer.vue')['default']
     MainSetting: typeof import('./src/components/Setting/MainSetting.vue')['default']
+    MediaSourceSelector: typeof import('./src/components/Modal/MediaSourceSelector.vue')['default']
     Menu: typeof import('./src/components/Layout/Menu.vue')['default']
     MobileSongMenu: typeof import('./src/components/Menu/MobileSongMenu.vue')['default']
     NA: typeof import('naive-ui')['NA']

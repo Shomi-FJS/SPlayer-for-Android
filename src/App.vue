@@ -11,6 +11,7 @@ import { useDevice } from "@/composables/useDevice";
 import { useImmersive } from "@/composables/useImmersive";
 import { useAndroidBack } from "@/composables/useAndroidBack";
 import { usePageZoom } from "@/composables/usePageZoom";
+import { useAndroidMediaSourceListener } from "@/composables/useAndroidMediaSourceListener";
 import { useSettingStore } from "@/stores";
 
 const { shellMode, deviceModeOverride } = useDevice();
@@ -28,6 +29,7 @@ watch(
 useImmersive();
 useAndroidBack();
 usePageZoom();
+useAndroidMediaSourceListener();
 </script>
 
 <style scoped>

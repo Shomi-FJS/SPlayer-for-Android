@@ -137,9 +137,15 @@ import type { DropdownOption } from "naive-ui";
 import { useSettingStore, useStatusStore } from "@/stores";
 import { useDevice } from "@/composables/useDevice";
 import { renderIcon } from "@/utils/helper";
-import { openSetting, openThemeConfig, openScalingModal, openUpdateApp } from "@/utils/modal";
+import {
+  openSetting,
+  openThemeConfig,
+  openScalingModal,
+  openUpdateApp,
+  openMediaSourceSelector,
+} from "@/utils/modal";
 import { useBackClosable } from "@/composables/useAndroidBack";
-import { isDev, isElectron } from "@/utils/env";
+import { isCapacitorAndroid, isDev, isElectron } from "@/utils/env";
 
 const router = useRouter();
 const settingStore = useSettingStore();
@@ -235,6 +241,12 @@ const setOptions = computed<DropdownOption[]>(() => [
     show: isElectron || isPad.value || isPhonePortrait.value,
   },
   {
+    key: "mediaSource",
+    label: "监听媒体源模式",
+    icon: renderIcon("Radio"),
+    show: isCapacitorAndroid,
+  },
+  {
     key: "divider-1",
     type: "divider",
   },
@@ -270,6 +282,9 @@ const setSelect = (key: string) => {
       break;
     case "zoom":
       openScalingModal();
+      break;
+    case "mediaSource":
+      openMediaSourceSelector();
       break;
     case "setting":
       openSetting();

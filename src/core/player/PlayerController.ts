@@ -15,6 +15,10 @@ import { calculateProgress } from "@/utils/time";
 import type { LyricLine } from "@applemusic-like-lyrics/lyric";
 import { type DebouncedFunc, throttle } from "lodash-es";
 import {
+  isExternalMediaSourceActive,
+  leaveAndroidMediaSourceMode,
+} from "@/composables/useAndroidMediaSourceListener";
+import {
   AndroidNativePlayback,
   type AndroidNativeMetadataPayload,
   type AndroidNativeWindowTrack,
@@ -198,6 +202,10 @@ class PlayerController {
     const statusStore = useStatusStore();
     const lyricManager = useLyricManager();
 
+    if (isCapacitorAndroid) {
+      leaveAndroidMediaSourceMode();
+    }
+
     musicStore.playSong = song;
     // $patch 批量提交：persist 只触发 1 次写，避免切歌瞬间多次持久化卡主线程
     // 用元数据 duration 立即填，否则进度条 max=0 会把所有 seek 钳到 0
@@ -208,6 +216,9 @@ class PlayerController {
         state.duration = song.duration;
       }
       state.progress = 0;
+      state.songQuality = song.quality;
+      state.audioSource = song.path ? "local" : song.type === "streaming" ? "streaming" : undefined;
+      state.availableQualities = [];
       state.lyricIndex = -1;
       state.lyricLoading = true;
       state.abLoop.enable = false;
@@ -913,11 +924,11 @@ class PlayerController {
     // 仍是上一首的值。后续 resolveSyncSongUrl(isCurrent=true) 会优先取 this.currentAudioSource.url，
     // 把上一首 URL 错推回 Android 队列。这里清空让其走 song.path / streamUrl / null 分支。
     this.currentAudioSource = null;
+
+    this.setupSongUI(nextSong, 0);
     const nativePlaybackInfo = this.inferNativePlaybackInfo(nextSong);
     statusStore.songQuality = nativePlaybackInfo.quality;
     statusStore.audioSource = nativePlaybackInfo.source;
-
-    this.setupSongUI(nextSong, 0);
     statusStore.currentTime = 0;
     statusStore.duration = nextSong.duration || 0;
     statusStore.progress = 0;
@@ -1025,11 +1036,11 @@ class PlayerController {
 
     // 修复 #2：同 applyNativeTrackChanged，清空 currentAudioSource 避免被 resolveSyncSongUrl 误用
     this.currentAudioSource = null;
+
+    this.setupSongUI(nextSong, 0);
     const nativePlaybackInfo = this.inferNativePlaybackInfo(nextSong);
     statusStore.songQuality = nativePlaybackInfo.quality;
     statusStore.audioSource = nativePlaybackInfo.source;
-
-    this.setupSongUI(nextSong, 0);
     statusStore.currentTime = 0;
     statusStore.duration = nextSong.duration || 0;
     statusStore.progress = 0;
@@ -1208,6 +1219,7 @@ class PlayerController {
     });
     // 进度更新
     this.onTimeUpdate = throttle(() => {
+      if (isCapacitorAndroid && isExternalMediaSourceActive.value) return;
       // AB 循环
       const { enable, pointA, pointB } = statusStore.abLoop;
       if (enable && pointA !== null && pointB !== null) {
@@ -1398,6 +1410,13 @@ class PlayerController {
     const statusStore = useStatusStore();
     const settingStore = useSettingStore();
     const audioManager = useAudioManager();
+    // 外部媒体源模式：转发给被监听应用
+    if (isCapacitorAndroid && isExternalMediaSourceActive.value) {
+      const target = settingStore.androidMediaSourceTargetPackage || undefined;
+      await AndroidNativePlayback.mediaSourcePlay({ packageName: target });
+      statusStore.playStatus = true;
+      return;
+    }
     // 如果已经在播放，直接返回
     if (statusStore.playStatus) return;
     // 清除 MPV 强制暂停状态（如果是 MPV 引擎）
@@ -1417,10 +1436,11 @@ class PlayerController {
     }
     const fadeTime = settingStore.getFadeTime ? settingStore.getFadeTime / 1000 : 0;
     try {
-      await audioManager.resume({ fadeIn: !!fadeTime, fadeDuration: fadeTime });
       statusStore.playStatus = true;
+      await audioManager.resume({ fadeIn: !!fadeTime, fadeDuration: fadeTime });
     } catch (error) {
       console.error("❌ 播放失败:", error);
+      statusStore.playStatus = false;
       // 如果是 AbortError，尝试重新加载
       if (error instanceof Error && error.name === "AbortError") {
         await this.playSong({ autoPlay: true });
@@ -1433,6 +1453,13 @@ class PlayerController {
     const statusStore = useStatusStore();
     const settingStore = useSettingStore();
     const audioManager = useAudioManager();
+    // 外部媒体源模式：转发给被监听应用
+    if (isCapacitorAndroid && isExternalMediaSourceActive.value) {
+      const target = settingStore.androidMediaSourceTargetPackage || undefined;
+      await AndroidNativePlayback.mediaSourcePause({ packageName: target });
+      if (changeStatus) statusStore.playStatus = false;
+      return;
+    }
     // 计算渐出时间
     const fadeTime = settingStore.getFadeTime ? settingStore.getFadeTime / 1000 : 0;
     audioManager.pause({ fadeOut: !!fadeTime, fadeDuration: fadeTime });
@@ -1443,6 +1470,19 @@ class PlayerController {
   /** 播放/暂停切换 */
   async playOrPause() {
     const statusStore = useStatusStore();
+    const settingStore = useSettingStore();
+    // 外部媒体源模式：转发给被监听应用
+    if (isCapacitorAndroid && isExternalMediaSourceActive.value) {
+      const target = settingStore.androidMediaSourceTargetPackage || undefined;
+      if (statusStore.playStatus) {
+        statusStore.playStatus = false;
+        await AndroidNativePlayback.mediaSourcePause({ packageName: target });
+      } else {
+        statusStore.playStatus = true;
+        await AndroidNativePlayback.mediaSourcePlay({ packageName: target });
+      }
+      return;
+    }
     if (statusStore.playStatus) await this.pause();
     else await this.play();
   }
@@ -1461,6 +1501,17 @@ class PlayerController {
     const dataStore = useDataStore();
     const statusStore = useStatusStore();
     const songManager = useSongManager();
+    const settingStore = useSettingStore();
+    // 外部媒体源模式：转发给被监听应用
+    if (isCapacitorAndroid && isExternalMediaSourceActive.value) {
+      const target = settingStore.androidMediaSourceTargetPackage || undefined;
+      if (type === "next") {
+        await AndroidNativePlayback.mediaSourceSkipToNext({ packageName: target });
+      } else {
+        await AndroidNativePlayback.mediaSourceSkipToPrevious({ packageName: target });
+      }
+      return;
+    }
     // 先暂停当前播放
     const audioManager = useAudioManager();
     // 立即显示加载状态
@@ -1529,6 +1580,7 @@ class PlayerController {
   /** 获取总时长 (ms) */
   public getDuration(): number {
     const statusStore = useStatusStore();
+    if (isCapacitorAndroid && isExternalMediaSourceActive.value) return statusStore.duration;
     const audioManager = useAudioManager();
     const duration = audioManager.duration;
     return duration > 0 ? Math.floor(duration * 1000) : statusStore.duration;
@@ -1537,6 +1589,7 @@ class PlayerController {
   /** 获取当前播放位置 (ms) */
   public getSeek(): number {
     const statusStore = useStatusStore();
+    if (isCapacitorAndroid && isExternalMediaSourceActive.value) return statusStore.currentTime;
     const audioManager = useAudioManager();
     // MPV 引擎 currentTime 在 statusStore 中（通过事件更新），Web Audio 从 audioManager 获取
     const currentTime = audioManager.currentTime;
@@ -1552,7 +1605,21 @@ class PlayerController {
       this.onTimeUpdate.cancel();
     }
     const statusStore = useStatusStore();
+    const settingStore = useSettingStore();
     const audioManager = useAudioManager();
+    // 外部媒体源模式：转发给被监听应用
+    if (isCapacitorAndroid && isExternalMediaSourceActive.value) {
+      const target = settingStore.androidMediaSourceTargetPackage || undefined;
+      const knownDuration = this.getDuration();
+      const safeTime =
+        knownDuration > 0 ? Math.max(0, Math.min(time, knownDuration)) : Math.max(0, time);
+      void AndroidNativePlayback.mediaSourceSeek({
+        positionMs: Math.round(safeTime),
+        packageName: target,
+      });
+      statusStore.currentTime = safeTime;
+      return;
+    }
     // duration <= 0 时（如 ExoPlayer 还在缓冲），不能用它截 time，否则所有 seek 都被裁成 0
     const knownDuration = this.getDuration();
     const safeTime =

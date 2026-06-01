@@ -146,6 +146,10 @@ const props = defineProps({
     type: Number,
     default: 0,
   },
+  timebaseLead: {
+    type: Number,
+    default: 0,
+  },
 });
 
 const musicStore = useMusicStore();
@@ -516,7 +520,7 @@ const jumpSeek = (time: number) => {
     clearTimeout(userScrollTimeoutId);
     userScrollTimeoutId = null;
   }
-  const offsetMs = statusStore.getSongOffset(musicStore.playSong?.id);
+  const offsetMs = statusStore.getSongOffset(musicStore.playSong?.id) + props.timebaseLead;
   player.setSeek(time - offsetMs);
   player.play();
 };

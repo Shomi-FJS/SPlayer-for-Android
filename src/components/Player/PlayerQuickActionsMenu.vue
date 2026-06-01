@@ -36,6 +36,19 @@
           />
         </div>
 
+        <div v-if="isCapacitorAndroid" class="qa-item">
+          <div class="qa-item-label">
+            <SvgIcon name="Stream" :size="18" />
+            <span class="qa-item-text">媒体源频谱</span>
+          </div>
+          <n-switch
+            :value="settingStore.androidMediaSourceVisualizerEnabled"
+            :round="false"
+            size="small"
+            @update:value="onToggleMediaSourceVisualizer"
+          />
+        </div>
+
         <!-- 动态封面 -->
         <div class="qa-item">
           <div class="qa-item-label">
@@ -370,6 +383,29 @@ const amllAnimationBg = computed<boolean>({
     }
   },
 });
+
+const enableMediaSourceVisualizer = () => {
+  settingStore.androidMediaSourceListenerEnabled = true;
+  settingStore.androidMediaSourceVisualizerEnabled = true;
+  settingStore.showSpectrums = true;
+  settingStore.playerBackgroundLowFreqVolume = true;
+  amllAnimationBg.value = true;
+};
+
+const onToggleMediaSourceVisualizer = (value: boolean) => {
+  if (!value) {
+    settingStore.androidMediaSourceVisualizerEnabled = false;
+    return;
+  }
+  window.$dialog?.info({
+    title: "开启媒体源频谱",
+    content:
+      "这次不会请求屏幕共享。Android 仍会把系统输出频谱归到录音权限里，所以提示可能看起来有点严肃。SPlayer 不会打开麦克风，只读取低精度频谱数据来驱动背景，不保存也不上送。",
+    positiveText: "继续开启",
+    negativeText: "先不了",
+    onPositiveClick: enableMediaSourceVisualizer,
+  }) ?? enableMediaSourceVisualizer();
+};
 
 // 注入 FullPlayer 提供的 hold 接口；FullPlayerMobile 路径下父级未 provide 时 inject 为 null 即可
 const playerMetaHold = inject(PLAYER_META_HOLD_KEY, null);

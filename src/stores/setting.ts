@@ -230,6 +230,12 @@ export interface SettingState {
   /** 是否开启系统音频集成 */
   smtcOpen: boolean;
   androidMediaControllerEnabled: boolean;
+  androidMediaSourceListenerEnabled: boolean;
+  androidMediaSourceVisualizerEnabled: boolean;
+  /** 目标媒体源包名，空字符串表示不限制 */
+  androidMediaSourceTargetPackage: string;
+  /** Android 媒体源设备歌词延迟补偿 */
+  androidMediaSourceLatencyProfiles: Record<string, number>;
   androidMediaControllerDesktopLyricEnabled: boolean;
   /** 允许与其他应用同时播放（不抢占音频焦点） */
   androidAllowMixWithOthers: boolean;
@@ -604,6 +610,10 @@ export const useSettingStore = defineStore("setting", {
     showSpectrums: false,
     smtcOpen: true,
     androidMediaControllerEnabled: true,
+    androidMediaSourceListenerEnabled: false,
+    androidMediaSourceVisualizerEnabled: false,
+    androidMediaSourceTargetPackage: "",
+    androidMediaSourceLatencyProfiles: {},
     androidMediaControllerDesktopLyricEnabled: false,
     androidAllowMixWithOthers: true,
     playSongDemo: false,

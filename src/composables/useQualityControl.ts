@@ -1,5 +1,6 @@
 import { songQuality } from "@/api/song";
 import { usePlayerController } from "@/core/player/PlayerController";
+import { isExternalMediaSourceActive } from "@/composables/useAndroidMediaSourceListener";
 import { useMusicStore, useSettingStore, useStatusStore } from "@/stores";
 import { QualityType } from "@/types/main";
 import { formatFileSize, handleSongQuality } from "@/utils/helper";
@@ -25,9 +26,13 @@ export const useQualityControl = () => {
   const settingStore = useSettingStore();
 
   const player = usePlayerController();
+  const isExternalMediaSourceSong = computed(
+    () => isExternalMediaSourceActive.value && musicStore.playSong.id < 0,
+  );
 
   // 获取音质名称
   const getQualityName = (quality: QualityType | undefined) => {
+    if (isExternalMediaSourceSong.value) return "LOCAL";
     const song = musicStore.playSong;
     if (song.path) return "本地";
     if (song.pc) return "云盘";
@@ -92,6 +97,10 @@ export const useQualityControl = () => {
    * @param isPreload 是否为预加载模式（静默加载，无错误提示）
    */
   const loadQualities = async (isPreload = false) => {
+    if (isExternalMediaSourceSong.value) {
+      statusStore.availableQualities = [];
+      return;
+    }
     // 本地歌曲或解锁歌曲不支持切换
     if (musicStore.playSong.path || statusStore.isUnlocked || musicStore.playSong.type !== "song")
       return;
@@ -156,7 +165,13 @@ export const useQualityControl = () => {
     getQualityName,
     isOnlineSong: computed(() => {
       const song = musicStore.playSong;
-      return !song.path && !song.pc && song.type === "song" && !statusStore.isUnlocked;
+      return (
+        !isExternalMediaSourceSong.value &&
+        !song.path &&
+        !song.pc &&
+        song.type === "song" &&
+        !statusStore.isUnlocked
+      );
     }),
   };
 };

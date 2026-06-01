@@ -13,11 +13,12 @@ export const calculateLyricIndex = (
   lyrics: LyricLine[],
   offset: number = 0,
   maxKeep: number = 3,
+  preRead: number = 300,
 ): number => {
   // 边界检查
   if (!lyrics || !lyrics.length) return -1;
   // 预处理时间
-  const playSeek = currentTime + offset + 300;
+  const playSeek = currentTime + offset + preRead;
   const getStart = (v: LyricLine) => v.startTime || 0;
   // 直接返回最后一句
   const lastLine = lyrics[lyrics.length - 1];

@@ -2,13 +2,25 @@ package top.imsyy.splayer.android.playback;
 
 import android.Manifest;
 import android.app.Activity;
+import android.content.ComponentName;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.ActivityInfo;
+import android.media.MediaMetadata;
+import android.media.session.MediaController;
+import android.media.session.MediaSessionManager;
+import android.media.session.PlaybackState;
 import android.net.Uri;
+import android.graphics.Bitmap;
 import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
+import android.os.SystemClock;
 import android.preference.PreferenceManager;
 import android.provider.Settings;
+import android.service.notification.NotificationListenerService;
+import android.text.TextUtils;
+import android.util.Base64;
 import androidx.annotation.Nullable;
 import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
@@ -19,6 +31,7 @@ import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 import com.getcapacitor.annotation.Permission;
 import com.getcapacitor.annotation.PermissionCallback;
+import java.io.ByteArrayOutputStream;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Supplier;
@@ -30,9 +43,23 @@ import top.imsyy.splayer.android.cache.AudioCacheProvider;
 @CapacitorPlugin(
     name = "AndroidNativePlayback",
     permissions = {
-      @Permission(alias = "notifications", strings = {Manifest.permission.POST_NOTIFICATIONS})
+      @Permission(alias = "notifications", strings = {Manifest.permission.POST_NOTIFICATIONS}),
+      @Permission(alias = "recordAudio", strings = {Manifest.permission.RECORD_AUDIO})
     })
 public class AndroidNativePlaybackPlugin extends Plugin {
+  public static class MediaSourceNotificationListenerService extends NotificationListenerService {}
+
+  private MediaSessionManager mediaSessionManager;
+  private MediaSessionManager.OnActiveSessionsChangedListener mediaSourceListener;
+  private String mediaSourceTargetPackage = "";
+  private MediaController currentCaptureController;
+  private MediaController.Callback currentCaptureCallback;
+  private ExternalAudioVisualizer externalAudioVisualizer;
+  private String lastMetadataSig = "";
+  private final Handler mainHandler = new Handler(Looper.getMainLooper());
+  private static final int COVER_MAX_DIM = 256;
+  private static final int COVER_JPEG_QUALITY = 60;
+
   @Override
   public void load() {
     PlaybackManager.getInstance(getContext()).attachPlugin(this);
@@ -40,6 +67,9 @@ public class AndroidNativePlaybackPlugin extends Plugin {
 
   @Override
   protected void handleOnDestroy() {
+    detachCaptureController();
+    stopMediaSourceListener();
+    stopExternalAudioVisualizer();
     PlaybackManager.getInstance(getContext()).detachPlugin(this);
   }
 
@@ -379,6 +409,150 @@ public class AndroidNativePlaybackPlugin extends Plugin {
     call.resolve(permissionResult(getPermissionState("notifications") == PermissionState.GRANTED));
   }
 
+  @PluginMethod
+  public void enableMediaSourceListener(PluginCall call) {
+    runOnMainThread(
+        call,
+        () -> {
+          if (!hasNotificationListenerPermission()) {
+            openNotificationListenerSettings();
+            call.resolve(mediaSourceListenerResult(false, false));
+            return;
+          }
+          startMediaSourceListener();
+          call.resolve(mediaSourceListenerResult(mediaSourceListener != null, true));
+        });
+  }
+
+  @PluginMethod
+  public void disableMediaSourceListener(PluginCall call) {
+    runOnMainThread(
+        call,
+        () -> {
+          stopMediaSourceListener();
+          call.resolve(mediaSourceListenerResult(false, hasNotificationListenerPermission()));
+        });
+  }
+
+  @PluginMethod
+  public void getMediaSourceListenerState(PluginCall call) {
+    call.resolve(mediaSourceListenerResult(mediaSourceListener != null, hasNotificationListenerPermission()));
+  }
+
+  @PluginMethod
+  public void setMediaSourceTargetPackage(PluginCall call) {
+    mediaSourceTargetPackage = call.getString("packageName", "");
+    mainHandler.post(() -> {
+      attachCaptureController(mediaSourceTargetPackage);
+      call.resolve();
+    });
+  }
+
+  @PluginMethod
+  public void getActiveMediaSources(PluginCall call) {
+    runOnMainThread(
+        call,
+        () -> {
+          if (!hasNotificationListenerPermission()) {
+            call.resolve(buildMediaSourcesResult(null));
+            return;
+          }
+          MediaSessionManager msm =
+              (MediaSessionManager) getContext().getSystemService(android.content.Context.MEDIA_SESSION_SERVICE);
+          if (msm == null) {
+            call.resolve(buildMediaSourcesResult(null));
+            return;
+          }
+          ComponentName listenerComponent =
+              new ComponentName(getContext(), MediaSourceNotificationListenerService.class);
+          List<MediaController> controllers = msm.getActiveSessions(listenerComponent);
+          call.resolve(buildMediaSourcesResult(controllers));
+        });
+  }
+
+  private JSObject buildMediaSourcesResult(@Nullable List<MediaController> controllers) {
+    JSObject result = new JSObject();
+    JSArray sources = new JSArray();
+    if (controllers != null) {
+      for (MediaController controller : controllers) {
+        JSObject source = new JSObject();
+        source.put("packageName", controller.getPackageName());
+        try {
+          android.content.pm.PackageManager pm = getContext().getPackageManager();
+          android.content.pm.ApplicationInfo ai = pm.getApplicationInfo(controller.getPackageName(), 0);
+          source.put("appName", pm.getApplicationLabel(ai).toString());
+        } catch (Exception e) {
+          source.put("appName", controller.getPackageName());
+        }
+        PlaybackState state = controller.getPlaybackState();
+        if (state != null) {
+          source.put("playbackState", state.getState());
+          source.put("isPlaying", state.getState() == PlaybackState.STATE_PLAYING);
+          source.put("positionMs", state.getPosition());
+        }
+        MediaMetadata metadata = controller.getMetadata();
+        if (metadata != null) {
+          putText(source, "title", metadata.getText(MediaMetadata.METADATA_KEY_TITLE));
+          putText(source, "artist", metadata.getText(MediaMetadata.METADATA_KEY_ARTIST));
+          putText(source, "album", metadata.getText(MediaMetadata.METADATA_KEY_ALBUM));
+          long duration = metadata.getLong(MediaMetadata.METADATA_KEY_DURATION);
+          if (duration > 0) {
+            source.put("durationMs", duration);
+          }
+        }
+        sources.put(source);
+      }
+    }
+    result.put("sources", sources);
+    result.put("count", controllers == null ? 0 : controllers.size());
+    return result;
+  }
+
+  @PluginMethod
+  public void getCaptureCover(PluginCall call) {
+    runOnMainThread(
+        call,
+        () -> {
+          JSObject result = new JSObject();
+          if (currentCaptureController == null) {
+            call.resolve(result);
+            return;
+          }
+          MediaMetadata md = currentCaptureController.getMetadata();
+          if (md == null) {
+            call.resolve(result);
+            return;
+          }
+          Bitmap bmp = md.getBitmap(MediaMetadata.METADATA_KEY_ART);
+          if (bmp == null) bmp = md.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART);
+          if (bmp == null) bmp = md.getBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON);
+          if (bmp != null) {
+            result.put("coverBase64", encodeBitmapToBase64(bmp));
+          }
+          call.resolve(result);
+        });
+  }
+
+  @PluginMethod
+  public void getCapturePosition(PluginCall call) {
+    runOnMainThread(
+        call,
+        () -> {
+          JSObject result = new JSObject();
+          if (currentCaptureController == null) {
+            call.resolve(result);
+            return;
+          }
+          PlaybackState state = currentCaptureController.getPlaybackState();
+          if (state != null) {
+            result.put("positionMs", state.getPosition());
+            result.put("speed", state.getPlaybackSpeed());
+            result.put("updateTimeMs", getPlaybackStateUpdateTimeWall(state));
+          }
+          call.resolve(result);
+        });
+  }
+
   // ========== 悬浮歌词相关 ==========
 
   @PluginMethod
@@ -496,6 +670,65 @@ public class AndroidNativePlaybackPlugin extends Plugin {
   }
 
   @PluginMethod
+  public void enableExternalAudioVisualizer(PluginCall call) {
+    boolean enable = call.getBoolean("enable", false);
+    if (!enable) {
+      stopExternalAudioVisualizer();
+      call.resolve(permissionResult(true));
+      return;
+    }
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+      call.resolve(permissionResult(false));
+      return;
+    }
+    if (getPermissionState("recordAudio") != PermissionState.GRANTED) {
+      requestPermissionForAlias("recordAudio", call, "onExternalAudioVisualizerPermissionResult");
+      return;
+    }
+    startExternalAudioVisualizer(call);
+  }
+
+  @PermissionCallback
+  private void onExternalAudioVisualizerPermissionResult(PluginCall call) {
+    if (call == null) return;
+    if (getPermissionState("recordAudio") != PermissionState.GRANTED) {
+      call.resolve(permissionResult(false));
+      return;
+    }
+    startExternalAudioVisualizer(call);
+  }
+
+  private void startExternalAudioVisualizer(PluginCall call) {
+    runOnMainThread(
+        call,
+        () -> {
+          if (externalAudioVisualizer == null) {
+            externalAudioVisualizer = new ExternalAudioVisualizer();
+          }
+          boolean ok =
+              externalAudioVisualizer.start(
+                  getContext(),
+                  new ExternalAudioVisualizer.Listener() {
+                    @Override
+                    public void onData(byte[] fftBins, float lowFreq) {
+                      emitExternalVisualizerData(fftBins, lowFreq);
+                    }
+
+                    @Override
+                    public void onStopped() {
+                      emitExternalVisualizerSilence();
+                      emitExternalAudioVisualizerState(false);
+                    }
+                  });
+          if (!ok) {
+            externalAudioVisualizer = null;
+          }
+          emitExternalAudioVisualizerState(ok);
+          call.resolve(permissionResult(ok));
+        });
+  }
+
+  @PluginMethod
   public void requestOverlayPermission(PluginCall call) {
     if (Settings.canDrawOverlays(getContext())) {
       call.resolve(permissionResult(true));
@@ -512,6 +745,37 @@ public class AndroidNativePlaybackPlugin extends Plugin {
 
   public void emitEvent(String eventName, JSObject payload, boolean retainUntilConsumed) {
     notifyListeners(eventName, payload, retainUntilConsumed);
+  }
+
+  private void stopExternalAudioVisualizer() {
+    if (externalAudioVisualizer != null) {
+      externalAudioVisualizer.stop();
+      externalAudioVisualizer = null;
+    } else {
+      emitExternalVisualizerSilence();
+      emitExternalAudioVisualizerState(false);
+    }
+  }
+
+  private void emitExternalVisualizerData(byte[] fftBins, float lowFreq) {
+    mainHandler.post(
+        () -> {
+          JSObject payload = new JSObject();
+          payload.put("fftB64", Base64.encodeToString(fftBins, Base64.NO_WRAP));
+          payload.put("lowFreq", lowFreq);
+          notifyListeners("visualizerData", payload, false);
+        });
+  }
+
+  private void emitExternalVisualizerSilence() {
+    byte[] empty = new byte[256];
+    emitExternalVisualizerData(empty, 0f);
+  }
+
+  private void emitExternalAudioVisualizerState(boolean enabled) {
+    JSObject payload = new JSObject();
+    payload.put("enabled", enabled);
+    notifyListeners("externalAudioVisualizerChanged", payload, false);
   }
 
   private void resolveOnMainThread(PluginCall call, Supplier<JSObject> action) {
@@ -543,6 +807,327 @@ public class AndroidNativePlaybackPlugin extends Plugin {
     JSObject result = new JSObject();
     result.put("granted", granted);
     return result;
+  }
+
+  private JSObject mediaSourceListenerResult(boolean enabled, boolean granted) {
+    JSObject result = new JSObject();
+    result.put("enabled", enabled);
+    result.put("granted", granted);
+    return result;
+  }
+
+  private boolean hasNotificationListenerPermission() {
+    String enabledListeners = Settings.Secure.getString(
+        getContext().getContentResolver(),
+        "enabled_notification_listeners");
+    if (enabledListeners == null) return false;
+    ComponentName listenerComponent = new ComponentName(
+        getContext(),
+        MediaSourceNotificationListenerService.class);
+    for (String item : enabledListeners.split(":")) {
+      ComponentName component = ComponentName.unflattenFromString(item.trim());
+      if (listenerComponent.equals(component)) return true;
+    }
+    return false;
+  }
+
+  private void openNotificationListenerSettings() {
+    Intent intent = new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS);
+    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+    getContext().startActivity(intent);
+  }
+
+  private void startMediaSourceListener() {
+    if (mediaSourceListener != null) {
+      return;
+    }
+
+    mediaSessionManager = (MediaSessionManager) getContext().getSystemService(android.content.Context.MEDIA_SESSION_SERVICE);
+    if (mediaSessionManager == null) {
+      return;
+    }
+
+    ComponentName listenerComponent = new ComponentName(
+        getContext(),
+        MediaSourceNotificationListenerService.class);
+    mediaSourceListener = controllers -> {
+      if (!TextUtils.isEmpty(mediaSourceTargetPackage)) {
+        boolean lost = currentCaptureController != null
+            && controllers != null
+            && controllers.stream().noneMatch(c -> c.getSessionToken().equals(currentCaptureController.getSessionToken()));
+        if (lost) {
+          detachCaptureController();
+          JSObject lostEvent = new JSObject();
+          lostEvent.put("eventType", "selectionLost");
+          notifyListeners("mediaSourceChanged", lostEvent, false);
+        }
+      }
+      emitSessionsList(controllers);
+    };
+    mediaSessionManager.addOnActiveSessionsChangedListener(mediaSourceListener, listenerComponent);
+    emitSessionsList(mediaSessionManager.getActiveSessions(listenerComponent));
+    if (!TextUtils.isEmpty(mediaSourceTargetPackage)) {
+      attachCaptureController(mediaSourceTargetPackage);
+    }
+  }
+
+  private void stopMediaSourceListener() {
+    detachCaptureController();
+    if (mediaSessionManager != null && mediaSourceListener != null) {
+      mediaSessionManager.removeOnActiveSessionsChangedListener(mediaSourceListener);
+    }
+    mediaSourceListener = null;
+    mediaSessionManager = null;
+  }
+
+  private void emitSessionsList(@Nullable List<MediaController> controllers) {
+    JSObject payload = new JSObject();
+    payload.put("eventType", "sessionsChanged");
+    payload.put("enabled", mediaSourceListener != null);
+    payload.put("activeSessionCount", controllers == null ? 0 : controllers.size());
+    notifyListeners("mediaSourceChanged", payload, false);
+  }
+
+  private void attachCaptureController(String packageName) {
+    detachCaptureController();
+    if (TextUtils.isEmpty(packageName) || mediaSessionManager == null) return;
+    ComponentName comp = new ComponentName(getContext(), MediaSourceNotificationListenerService.class);
+    List<MediaController> controllers = mediaSessionManager.getActiveSessions(comp);
+    MediaController target = null;
+    for (MediaController c : controllers) {
+      if (packageName.equals(c.getPackageName())) {
+        target = c;
+        break;
+      }
+    }
+    if (target == null) return;
+    currentCaptureController = target;
+    lastMetadataSig = "";
+    currentCaptureCallback = new MediaController.Callback() {
+      @Override
+      public void onMetadataChanged(@Nullable MediaMetadata metadata) {
+        emitCaptureMetadata(currentCaptureController, metadata);
+      }
+
+      @Override
+      public void onPlaybackStateChanged(@Nullable PlaybackState state) {
+        emitCapturePlaybackState(state);
+      }
+
+      @Override
+      public void onSessionDestroyed() {
+        detachCaptureController();
+        JSObject lostEvent = new JSObject();
+        lostEvent.put("eventType", "selectionLost");
+        notifyListeners("mediaSourceChanged", lostEvent, false);
+      }
+    };
+    target.registerCallback(currentCaptureCallback, mainHandler);
+    JSObject selectedEvent = new JSObject();
+    selectedEvent.put("eventType", "selected");
+    selectedEvent.put("packageName", target.getPackageName());
+    notifyListeners("mediaSourceChanged", selectedEvent, false);
+    emitCaptureMetadata(target, target.getMetadata());
+    emitCapturePlaybackState(target.getPlaybackState());
+  }
+
+  private void detachCaptureController() {
+    if (currentCaptureController != null && currentCaptureCallback != null) {
+      currentCaptureController.unregisterCallback(currentCaptureCallback);
+    }
+    currentCaptureController = null;
+    currentCaptureCallback = null;
+    lastMetadataSig = "";
+  }
+
+  private void emitCaptureMetadata(MediaController ctrl, @Nullable MediaMetadata md) {
+    if (ctrl == null || md == null) return;
+    String sig = buildMetadataSig(ctrl, md);
+    if (sig.equals(lastMetadataSig)) return;
+    lastMetadataSig = sig;
+
+    JSObject payload = new JSObject();
+    payload.put("eventType", "metadata");
+    payload.put("packageName", ctrl.getPackageName());
+    putText(payload, "title", md.getText(MediaMetadata.METADATA_KEY_TITLE));
+    CharSequence artistText = md.getText(MediaMetadata.METADATA_KEY_ARTIST);
+    if (TextUtils.isEmpty(artistText)) {
+      artistText = md.getText(MediaMetadata.METADATA_KEY_ALBUM_ARTIST);
+    }
+    putText(payload, "artist", artistText);
+    putText(payload, "album", md.getText(MediaMetadata.METADATA_KEY_ALBUM));
+    long duration = md.getLong(MediaMetadata.METADATA_KEY_DURATION);
+    if (duration > 0) {
+      payload.put("durationMs", duration);
+    }
+
+    Bitmap bmp = md.getBitmap(MediaMetadata.METADATA_KEY_ART);
+    if (bmp == null) bmp = md.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART);
+    if (bmp == null) bmp = md.getBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON);
+    if (bmp != null) {
+      payload.put("coverBase64", encodeBitmapToBase64(bmp));
+    }
+
+    notifyListeners("mediaSourceChanged", payload, false);
+  }
+
+  private void emitCapturePlaybackState(@Nullable PlaybackState state) {
+    if (state == null) return;
+    JSObject payload = new JSObject();
+    payload.put("eventType", "playbackState");
+    payload.put("playbackState", state.getState());
+    payload.put("isPlaying", state.getState() == PlaybackState.STATE_PLAYING);
+    payload.put("positionMs", state.getPosition());
+    payload.put("speed", state.getPlaybackSpeed());
+    payload.put("updateTimeMs", getPlaybackStateUpdateTimeWall(state));
+    notifyListeners("mediaSourceChanged", payload, false);
+  }
+
+  private long getPlaybackStateUpdateTimeWall(PlaybackState state) {
+    long nowWall = System.currentTimeMillis();
+    long lastUpdateElapsed = state.getLastPositionUpdateTime();
+    if (lastUpdateElapsed <= 0) return nowWall;
+    long updateTimeWall = nowWall - (SystemClock.elapsedRealtime() - lastUpdateElapsed);
+    return updateTimeWall > 0 && updateTimeWall <= nowWall ? updateTimeWall : nowWall;
+  }
+
+  private String buildMetadataSig(MediaController ctrl, MediaMetadata md) {
+    String title = textOrEmpty(md, MediaMetadata.METADATA_KEY_TITLE);
+    String artist = textOrEmpty(md, MediaMetadata.METADATA_KEY_ARTIST);
+    String album = textOrEmpty(md, MediaMetadata.METADATA_KEY_ALBUM);
+    long duration = md.getLong(MediaMetadata.METADATA_KEY_DURATION);
+    Bitmap bmp = md.getBitmap(MediaMetadata.METADATA_KEY_ART);
+    if (bmp == null) bmp = md.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART);
+    if (bmp == null) bmp = md.getBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON);
+    String coverFp = bmp != null ? (bmp.getWidth() + "x" + bmp.getByteCount()) : "null";
+    return ctrl.getPackageName() + "\u0001" + title + "\u0001" + artist + "\u0001" + album + "\u0001" + duration + "\u0001" + coverFp;
+  }
+
+  private String textOrEmpty(MediaMetadata md, String key) {
+    CharSequence cs = md.getText(key);
+    return cs != null ? cs.toString() : "";
+  }
+
+  private String encodeBitmapToBase64(Bitmap src) {
+    int w = src.getWidth();
+    int h = src.getHeight();
+    Bitmap scaled = src;
+    if (w > COVER_MAX_DIM || h > COVER_MAX_DIM) {
+      float scale = Math.min((float) COVER_MAX_DIM / w, (float) COVER_MAX_DIM / h);
+      int nw = Math.round(w * scale);
+      int nh = Math.round(h * scale);
+      scaled = Bitmap.createScaledBitmap(src, nw, nh, true);
+    }
+    ByteArrayOutputStream baos = new ByteArrayOutputStream();
+    scaled.compress(Bitmap.CompressFormat.JPEG, COVER_JPEG_QUALITY, baos);
+    if (scaled != src) scaled.recycle();
+    return Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP);
+  }
+
+  private void emitMediaSourceChanged() {
+    if (mediaSessionManager == null || !hasNotificationListenerPermission()) {
+      emitSessionsList(null);
+      return;
+    }
+    ComponentName listenerComponent = new ComponentName(
+        getContext(),
+        MediaSourceNotificationListenerService.class);
+    emitSessionsList(mediaSessionManager.getActiveSessions(listenerComponent));
+  }
+
+  private void putText(JSObject payload, String key, @Nullable CharSequence value) {
+    if (!TextUtils.isEmpty(value)) {
+      payload.put(key, value.toString());
+    }
+  }
+
+  @Nullable
+  private MediaController findMediaController(@Nullable String targetPackage) {
+    if (mediaSessionManager == null) return null;
+    ComponentName listenerComponent =
+        new ComponentName(getContext(), MediaSourceNotificationListenerService.class);
+    List<MediaController> controllers = mediaSessionManager.getActiveSessions(listenerComponent);
+    if (controllers == null || controllers.isEmpty()) return null;
+    if (!TextUtils.isEmpty(targetPackage)) {
+      for (MediaController c : controllers) {
+        if (targetPackage.equals(c.getPackageName())) {
+          return c;
+        }
+      }
+      return null;
+    }
+    return controllers.get(0);
+  }
+
+  @PluginMethod
+  public void mediaSourcePlay(PluginCall call) {
+    String targetPackage = call.getString("packageName", null);
+    runOnMainThread(
+        call,
+        () -> {
+          MediaController controller = findMediaController(targetPackage);
+          if (controller != null) {
+            controller.getTransportControls().play();
+          }
+          call.resolve();
+        });
+  }
+
+  @PluginMethod
+  public void mediaSourcePause(PluginCall call) {
+    String targetPackage = call.getString("packageName", null);
+    runOnMainThread(
+        call,
+        () -> {
+          MediaController controller = findMediaController(targetPackage);
+          if (controller != null) {
+            controller.getTransportControls().pause();
+          }
+          call.resolve();
+        });
+  }
+
+  @PluginMethod
+  public void mediaSourceSkipToNext(PluginCall call) {
+    String targetPackage = call.getString("packageName", null);
+    runOnMainThread(
+        call,
+        () -> {
+          MediaController controller = findMediaController(targetPackage);
+          if (controller != null) {
+            controller.getTransportControls().skipToNext();
+          }
+          call.resolve();
+        });
+  }
+
+  @PluginMethod
+  public void mediaSourceSkipToPrevious(PluginCall call) {
+    String targetPackage = call.getString("packageName", null);
+    runOnMainThread(
+        call,
+        () -> {
+          MediaController controller = findMediaController(targetPackage);
+          if (controller != null) {
+            controller.getTransportControls().skipToPrevious();
+          }
+          call.resolve();
+        });
+  }
+
+  @PluginMethod
+  public void mediaSourceSeek(PluginCall call) {
+    String targetPackage = call.getString("packageName", null);
+    long positionMs = (long) (double) call.getDouble("positionMs", 0.0);
+    runOnMainThread(
+        call,
+        () -> {
+          MediaController controller = findMediaController(targetPackage);
+          if (controller != null) {
+            controller.getTransportControls().seekTo(positionMs);
+          }
+          call.resolve();
+        });
   }
 
   @Nullable

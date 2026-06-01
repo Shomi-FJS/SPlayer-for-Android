@@ -511,21 +511,15 @@ const artistName = computed(() => {
   return (artists as string) || "未知艺术家";
 });
 
-// 页面可用性变化时按页面语义迁移 pageIndex
-watch([hasComment, hasLyric], (_n, [prevHasComment, prevHasLyric]) => {
-  const prevCommentIdx = prevHasComment ? 0 : -1;
-  const prevInfoIdx = prevHasComment ? 1 : 0;
-  const prevLyricIdx = prevHasLyric ? prevInfoIdx + 1 : -1;
-
-  let prevType: MobilePageType = "info";
-  if (pageIndex.value === prevCommentIdx) prevType = "comment";
-  else if (pageIndex.value === prevLyricIdx) prevType = "lyric";
-
-  pageIndex.value = resolveSavedPageIndex(prevType);
+// 页面可用性变化时恢复用户上次停留的页面
+watch([hasComment, hasLyric], () => {
+  pageIndex.value = resolveSavedPageIndex(savedPageType);
 });
 
 // 同步缓存页面语义
 watch(currentPageType, (t) => {
+  if (t === "info" && savedPageType === "lyric" && !hasLyric.value) return;
+  if (t === "info" && savedPageType === "comment" && !hasComment.value) return;
   savedPageType = t;
 });
 
