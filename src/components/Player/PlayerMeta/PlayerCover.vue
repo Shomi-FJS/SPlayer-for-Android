@@ -75,21 +75,25 @@ const { isPhone } = useDevice();
 
 // 本地歌曲高清封面（Data URL）
 const localCoverDataUrl = ref<string>("");
+let localCoverRequestId = 0;
 
 // 动态封面
 const dynamicCover = ref<string>("");
 const dynamicCoverLoaded = ref<boolean>(false);
+let dynamicCoverRequestId = 0;
 
 // 视频元素
 const videoRef = ref<HTMLVideoElement | null>(null);
 
 // 清理本地封面资源
 const cleanupLocalCover = () => {
+  localCoverRequestId++;
   localCoverDataUrl.value = "";
 };
 
 // 清理动态封面资源
 const cleanupDynamicCover = () => {
+  dynamicCoverRequestId++;
   if (videoRef.value) {
     videoRef.value.pause();
     videoRef.value.src = "";
@@ -111,22 +115,26 @@ const { start: dynamicCoverStart, stop: dynamicCoverStop } = useTimeoutFn(
 
 // 获取本地歌曲高清封面
 const getLocalCover = async () => {
-  if (!isElectron || !musicStore.playSong.path || musicStore.playSong.type === "streaming") {
-    cleanupLocalCover();
+  const requestId = ++localCoverRequestId;
+  const songPath = musicStore.playSong.path;
+  if (!isElectron || !songPath || musicStore.playSong.type === "streaming") {
+    localCoverDataUrl.value = "";
     return;
   }
   // 先检查blob中是否存在
   const blobURLManager = useBlobURLManager();
-  const blobURL = blobURLManager.getBlobURL(musicStore.playSong.path);
+  const blobURL = blobURLManager.getBlobURL(songPath);
   if (blobURL) {
+    if (requestId !== localCoverRequestId || musicStore.playSong.path !== songPath) return;
     localCoverDataUrl.value = blobURL;
     return;
   }
   try {
     const coverData = (await window.electron.ipcRenderer.invoke(
       "get-music-cover",
-      musicStore.playSong.path,
+      songPath,
     )) as { data: ArrayBuffer; format: string } | null;
+    if (requestId !== localCoverRequestId || musicStore.playSong.path !== songPath) return;
     if (coverData) {
       // 使用 Data URL，确保跨窗口可用
       const blob = new Blob([coverData.data], { type: coverData.format });
@@ -137,6 +145,7 @@ const getLocalCover = async () => {
         reader.onabort = reject;
         reader.readAsDataURL(blob);
       });
+      if (requestId !== localCoverRequestId || musicStore.playSong.path !== songPath) return;
       localCoverDataUrl.value = dataUrl;
     } else {
       localCoverDataUrl.value = "";
@@ -149,17 +158,21 @@ const getLocalCover = async () => {
 
 // 获取动态封面
 const getDynamicCover = async () => {
+  dynamicCoverStop();
+  cleanupDynamicCover();
+  const requestId = ++dynamicCoverRequestId;
+  const songId = musicStore.playSong.id;
   if (
     isLogin() !== 1 ||
     musicStore.playSong.path ||
-    !musicStore.playSong.id ||
+    !songId ||
     !settingStore.dynamicCover ||
     settingStore.playerType !== "cover"
   )
     return;
-  dynamicCoverStop();
   dynamicCoverLoaded.value = false;
-  const result = await songDynamicCover(musicStore.playSong.id);
+  const result = await songDynamicCover(songId);
+  if (requestId !== dynamicCoverRequestId || musicStore.playSong.id !== songId) return;
   if (!isEmpty(result.data) && result?.data?.videoPlayUrl) {
     // 升级 https 避免 HTTPS 页面 Mixed Content 拦截
     dynamicCover.value = String(result.data.videoPlayUrl).replace(/^http:\/\//i, "https://");

@@ -726,3 +726,18 @@ export const openExcludeComment = async () => {
     },
   });
 };
+
+/** 打开媒体源选择弹窗 */
+export const openMediaSourceSelector = async () => {
+  const { default: MediaSourceSelector } = await import("@/components/Modal/MediaSourceSelector.vue");
+  window.$modal.create({
+    preset: "card",
+    transformOrigin: "center",
+    autoFocus: false,
+    style: { width: "min(400px, calc(100vw - 32px))" },
+    title: "选择媒体源",
+    content: () => {
+      return h(MediaSourceSelector);
+    },
+  });
+};

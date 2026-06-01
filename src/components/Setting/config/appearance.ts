@@ -120,6 +120,19 @@ export const useAppearanceSettings = (): SettingConfig => {
             action: openScalingModal,
           },
           {
+            key: "androidMediaSourceListenerEnabled",
+            label: "媒体源监听",
+            type: "switch",
+            show: isCapacitorAndroid,
+            description: "监听 Android 系统媒体源变化，用于同步媒体状态",
+            value: computed({
+              get: () => settingStore.androidMediaSourceListenerEnabled,
+              set: (v) => {
+                settingStore.androidMediaSourceListenerEnabled = v;
+              },
+            }),
+          },
+          {
             key: "useBorderless",
             label: "无边框窗口模式",
             type: "switch",

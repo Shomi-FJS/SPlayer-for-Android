@@ -150,6 +150,64 @@ export interface AndroidNativePermissionResult {
   granted: boolean;
 }
 
+export interface AndroidNativeMediaSourceListenerState {
+  enabled: boolean;
+  granted: boolean;
+}
+
+export interface AndroidNativeMediaSourceLatencyProfile {
+  deviceKey: string;
+  deviceName: string;
+  deviceType: "bluetooth" | "wired" | "speaker" | "unknown";
+  suggestedLatencyMs: number;
+}
+
+export interface AndroidNativeMediaSource {
+  packageName: string;
+  appName: string;
+  title?: string;
+  artist?: string;
+  album?: string;
+  playbackState?: number;
+  isPlaying?: boolean;
+  durationMs?: number;
+  positionMs?: number;
+  coverBase64?: string;
+}
+
+export interface AndroidNativeMediaSourceChangedEvent {
+  eventType: "sessionsChanged" | "selected" | "metadata" | "playbackState" | "selectionLost";
+  enabled?: boolean;
+  activeSessionCount?: number;
+  packageName?: string;
+  title?: string;
+  artist?: string;
+  album?: string;
+  playbackState?: number;
+  isPlaying?: boolean;
+  durationMs?: number;
+  positionMs?: number;
+  speed?: number;
+  updateTimeMs?: number;
+  coverBase64?: string;
+  coverFingerprint?: string;
+}
+
+export interface AndroidNativeMediaSourcePosition {
+  positionMs?: number;
+  speed?: number;
+  updateTimeMs?: number;
+}
+
+export interface AndroidNativeExternalAudioVisualizerChangedEvent {
+  enabled: boolean;
+}
+
+export interface AndroidNativeMediaSourcesResult {
+  sources: AndroidNativeMediaSource[];
+  count: number;
+}
+
 /**
  * 频谱可视化数据事件 payload
  * - fft: 长度 256 的 0-255 整数数组，覆盖 0~24kHz（FftAudioProcessor 解码链 FFT 输出）
@@ -228,6 +286,19 @@ export interface AndroidNativePlaybackPlugin {
   }): Promise<void>;
   getState(): Promise<AndroidNativePlaybackState>;
   requestNotificationPermission(): Promise<AndroidNativePermissionResult>;
+  getMediaSourceListenerState(): Promise<AndroidNativeMediaSourceListenerState>;
+  enableMediaSourceListener(): Promise<AndroidNativeMediaSourceListenerState>;
+  disableMediaSourceListener(): Promise<AndroidNativeMediaSourceListenerState>;
+  getActiveMediaSources(): Promise<AndroidNativeMediaSourcesResult>;
+  setMediaSourceTargetPackage(options: { packageName: string }): Promise<void>;
+  getCaptureCover(): Promise<{ coverBase64?: string }>;
+  getCapturePosition(): Promise<AndroidNativeMediaSourcePosition>;
+  getMediaSourceLatencyProfile(): Promise<AndroidNativeMediaSourceLatencyProfile>;
+  mediaSourcePlay(options?: { packageName?: string }): Promise<void>;
+  mediaSourcePause(options?: { packageName?: string }): Promise<void>;
+  mediaSourceSkipToNext(options?: { packageName?: string }): Promise<void>;
+  mediaSourceSkipToPrevious(options?: { packageName?: string }): Promise<void>;
+  mediaSourceSeek(options: { positionMs: number; packageName?: string }): Promise<void>;
   showFloatingLyric(): Promise<void>;
   hideFloatingLyric(): Promise<void>;
   updateFloatingLyricData(options: AndroidNativeFloatingLyricDataPayload): Promise<void>;
@@ -241,6 +312,7 @@ export interface AndroidNativePlaybackPlugin {
    * 关闭时 Java 端 listener=null 直接跳过 FFT 计算，CPU 占用归零。
    */
   enableVisualizer(options: { enable: boolean }): Promise<AndroidNativePermissionResult>;
+  enableExternalAudioVisualizer(options: { enable: boolean }): Promise<AndroidNativePermissionResult>;
   /**
    * 预下载音频前 512 KB 到 ExoPlayer SimpleCache。fire-and-forget，立即 resolve。
    * 同 url 并发去重；切歌时未完成的预下载会自动取消让带宽。
@@ -269,6 +341,14 @@ export interface AndroidNativePlaybackPlugin {
   addListener(
     eventName: "visualizerData",
     listenerFunc: (event: AndroidNativeVisualizerDataEvent) => void,
+  ): Promise<PluginListenerHandle>;
+  addListener(
+    eventName: "mediaSourceChanged",
+    listenerFunc: (event: AndroidNativeMediaSourceChangedEvent) => void,
+  ): Promise<PluginListenerHandle>;
+  addListener(
+    eventName: "externalAudioVisualizerChanged",
+    listenerFunc: (event: AndroidNativeExternalAudioVisualizerChangedEvent) => void,
   ): Promise<PluginListenerHandle>;
   removeAllListeners(): Promise<void>;
 }

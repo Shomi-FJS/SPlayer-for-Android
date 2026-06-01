@@ -1,8 +1,12 @@
 <template>
   <div class="player-lyric">
     <!-- 歌词内容 -->
-    <AMLyric v-if="settingStore.useAMLyrics" :currentTime="playSeek" />
-    <DefaultLyric v-else :currentTime="playSeek" />
+    <AMLyric
+      v-if="settingStore.useAMLyrics"
+      :currentTime="playSeek"
+      :timebaseLead="lyricTimebaseLead"
+    />
+    <DefaultLyric v-else :currentTime="playSeek" :timebaseLead="lyricTimebaseLead" />
     <!-- 歌词菜单 -->
     <n-flex :class="['lyric-menu', { show: statusStore.playerMetaShow }]" justify="center" vertical>
       <div
@@ -93,11 +97,19 @@
 import { usePlayerController } from "@/core/player/PlayerController";
 import { useMusicStore, useSettingStore, useStatusStore } from "@/stores";
 import { openSetting, openCopyLyrics } from "@/utils/modal";
+import {
+  androidMediaSourceLyricTimebaseLead,
+  isExternalMediaSourceActive,
+  setAndroidMediaSourceLatencyAdjustment,
+} from "@/composables/useAndroidMediaSourceListener";
 
 const musicStore = useMusicStore();
 const settingStore = useSettingStore();
 const statusStore = useStatusStore();
 const player = usePlayerController();
+const lyricTimebaseLead = computed(() =>
+  isExternalMediaSourceActive.value ? androidMediaSourceLyricTimebaseLead.value : 0,
+);
 
 /**
  * 当前歌曲 id
@@ -105,13 +117,17 @@ const player = usePlayerController();
 const currentSongId = computed(() => musicStore.playSong?.id as number | undefined);
 
 // 实时播放进度
-const playSeek = ref<number>(player.getSeek() + statusStore.getSongOffset(musicStore.playSong?.id));
+const playSeek = ref<number>(
+  player.getSeek() +
+    (isExternalMediaSourceActive.value ? 0 : statusStore.getSongOffset(musicStore.playSong?.id)) +
+    lyricTimebaseLead.value,
+);
 
 // 立即同步真实播放位置（不等下帧 rAF）
 const syncPlaySeek = () => {
   const songId = musicStore.playSong?.id;
-  const offsetTime = statusStore.getSongOffset(songId);
-  playSeek.value = player.getSeek() + offsetTime;
+  const offsetTime = isExternalMediaSourceActive.value ? 0 : statusStore.getSongOffset(songId);
+  playSeek.value = player.getSeek() + offsetTime + lyricTimebaseLead.value;
 };
 
 // 实时更新播放进度
@@ -142,28 +158,41 @@ watch(
   () => statusStore.getSongOffset(currentSongId.value),
   () => syncPlaySeek(),
 );
+watch(lyricTimebaseLead, () => syncPlaySeek());
 watch(() => statusStore.playStatus, updateSeekRunning);
 
 /**
  * 当前进度偏移值
  */
 const currentTimeOffsetValue = computed(() => {
-  const currentTimeOffset = statusStore.getSongOffset(currentSongId.value);
+  const currentTimeOffset = isExternalMediaSourceActive.value
+    ? androidMediaSourceLyricTimebaseLead.value
+    : statusStore.getSongOffset(currentSongId.value);
   if (currentTimeOffset === 0) return "0";
   // 将毫秒转换为秒显示
   const offsetSeconds = parseFloat((currentTimeOffset / 1000).toFixed(2));
   return currentTimeOffset > 0 ? `+${offsetSeconds}` : `${offsetSeconds}`;
 });
 
+const setCurrentOffset = (value: number) => {
+  if (isExternalMediaSourceActive.value) {
+    setAndroidMediaSourceLatencyAdjustment(value);
+    statusStore.resetSongOffset(currentSongId.value);
+    return;
+  }
+  statusStore.setSongOffset(currentSongId.value, value);
+};
+
 /**
  * 当前进度偏移值（毫秒）
  */
 const offsetMilliseconds = computed({
   get: () => {
+    if (isExternalMediaSourceActive.value) return androidMediaSourceLyricTimebaseLead.value;
     return statusStore.getSongOffset(currentSongId.value);
   },
   set: (val: number | null) => {
-    statusStore.setSongOffset(currentSongId.value, val || 0);
+    setCurrentOffset(val || 0);
   },
 });
 
@@ -172,14 +201,14 @@ const offsetMilliseconds = computed({
  * @param delta 偏移量（单位：毫秒）
  */
 const changeOffset = (delta: number) => {
-  statusStore.incSongOffset(currentSongId.value, delta);
+  setCurrentOffset(offsetMilliseconds.value + delta);
 };
 
 /**
  * 重置进度偏移
  */
 const resetOffset = () => {
-  statusStore.resetSongOffset(currentSongId.value);
+  setCurrentOffset(0);
 };
 
 onMounted(() => {

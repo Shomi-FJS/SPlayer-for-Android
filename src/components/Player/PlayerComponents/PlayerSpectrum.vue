@@ -22,10 +22,18 @@ const isKeepDrawing = ref<boolean>(true);
 
 const SKIP_BINS = 10;
 const SPECTRUM_GAIN = 0.8;
+const FRAME_BASE_MS = 16.67;
+const ATTACK_SMOOTHING = 0.36;
+const RELEASE_SMOOTHING = 0.12;
+const NOISE_FLOOR = 0;
+const SPATIAL_SMOOTHING = 0.18;
+const MIN_VISIBLE_BAR_HEIGHT = 1;
 let cachedCanvasWidth = 0;
 let cachedCanvasHeight = 0;
 let cachedPixelRatio = 0;
 let ctx: CanvasRenderingContext2D | null = null;
+let smoothedSpectrumData = new Float32Array(0);
+let lastFrameTime = 0;
 
 // 仅尺寸变化时重设 canvas
 const updateCanvasSize = () => {
@@ -50,17 +58,51 @@ const updateCanvasSize = () => {
   }
 };
 
-// 数据源 30Hz，锁 ~30Hz 重绘与数据更新同步
-const DRAW_INTERVAL_MS = 33;
-let lastDrawTime = 0;
+const getFrameAlpha = (baseAlpha: number, deltaMs: number) => {
+  const normalizedDelta = Math.max(0.5, Math.min(3, deltaMs / FRAME_BASE_MS));
+  return 1 - Math.pow(1 - baseAlpha, normalizedDelta);
+};
+
+const resetSpectrumSmoothing = () => {
+  smoothedSpectrumData = new Float32Array(0);
+  lastFrameTime = 0;
+};
+
+const updateSmoothedSpectrum = (spectrumData: Uint8Array, deltaMs: number) => {
+  const shouldSeed = smoothedSpectrumData.length !== spectrumData.length;
+  if (smoothedSpectrumData.length !== spectrumData.length) {
+    smoothedSpectrumData = new Float32Array(spectrumData.length);
+  }
+  const attack = getFrameAlpha(ATTACK_SMOOTHING, deltaMs);
+  const release = getFrameAlpha(RELEASE_SMOOTHING, deltaMs);
+  for (let i = 0; i < spectrumData.length; i++) {
+    const target = spectrumData[i] <= NOISE_FLOOR ? 0 : spectrumData[i];
+    if (shouldSeed) {
+      smoothedSpectrumData[i] = target;
+      continue;
+    }
+    const current = smoothedSpectrumData[i];
+    const alpha = target > current ? attack : release;
+    smoothedSpectrumData[i] = current + (target - current) * alpha;
+  }
+};
+
+const getSmoothedBin = (index: number) => {
+  const center = smoothedSpectrumData[index] || 0;
+  if (SPATIAL_SMOOTHING <= 0) return center;
+  const prev = smoothedSpectrumData[index - 1] ?? center;
+  const next = smoothedSpectrumData[index + 1] ?? center;
+  return center * (1 - SPATIAL_SMOOTHING) + ((prev + next) / 2) * SPATIAL_SMOOTHING;
+};
 
 const drawSpectrum = () => {
   if (!isKeepDrawing.value || !ctx) return;
   const now = performance.now();
-  if (now - lastDrawTime < DRAW_INTERVAL_MS) return;
-  lastDrawTime = now;
+  const deltaMs = lastFrameTime > 0 ? now - lastFrameTime : FRAME_BASE_MS;
+  lastFrameTime = now;
   const spectrumData = player.getSpectrumData();
   if (!spectrumData) return;
+  updateSmoothedSpectrum(spectrumData, deltaMs);
   const dataLen = spectrumData.length - SKIP_BINS;
   if (dataLen <= 0) return;
   const numBars = Math.floor(dataLen / 2.5);
@@ -77,8 +119,12 @@ const drawSpectrum = () => {
   // 累积所有柱到单 Path 后一次 fill，减少 GPU 状态切换
   ctx.beginPath();
   for (let i = 0; i < numBars; i++) {
-    const barHeight = (spectrumData[i + SKIP_BINS] / 255) * canvasHeight * SPECTRUM_GAIN;
-    if (barHeight <= 0) continue;
+    const binValue = getSmoothedBin(i + SKIP_BINS);
+    if (binValue <= 0) continue;
+    const barHeight = Math.max(
+      MIN_VISIBLE_BAR_HEIGHT,
+      (binValue / 255) * canvasHeight * SPECTRUM_GAIN,
+    );
     const x1 = i * barWidth + halfWidth;
     const x2 = halfWidth - (i + 1) * barWidth;
     const y = canvasHeight - barHeight;
@@ -129,6 +175,7 @@ const acquireVis = () => {
 const releaseVis = () => {
   if (!visualizerHeld) return;
   visualizerHeld = false;
+  resetSpectrumSmoothing();
   player.releaseVisualizer();
 };
 
@@ -162,6 +209,7 @@ watch(() => props.height, () => updateCanvasSize());
 onBeforeUnmount(() => {
   isKeepDrawing.value = false;
   pauseDraw();
+  resetSpectrumSmoothing();
   window.removeEventListener("resize", onResize);
   document.removeEventListener("visibilitychange", onVisibility);
   releaseVis();

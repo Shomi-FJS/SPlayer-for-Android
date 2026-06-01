@@ -102,6 +102,11 @@ public final class PlaybackManager {
    */
   private final java.util.concurrent.atomic.AtomicLong resolveTokenCounter =
       new java.util.concurrent.atomic.AtomicLong();
+  /**
+   * 封面加载请求 token：切歌时旧封面可能晚返回，必须丢弃，避免媒体面板回退到上一首封面。
+   */
+  private final java.util.concurrent.atomic.AtomicLong coverLoadTokenCounter =
+      new java.util.concurrent.atomic.AtomicLong();
 
   private ExoPlayer player;
   /** 暴露给 MediaSession 的包装 Player：覆写 availableCommands，让系统媒体面板始终展示上一/下一首。 */
@@ -1450,11 +1455,11 @@ public final class PlaybackManager {
     clearPendingSeek();
     lastKnownPositionMs = 0L;
     durationCalibratedForSource = "";
+    loadCoverBitmapAsync(currentMetadata.coverUrl);
     player.setMediaItem(buildMediaItem(currentSource));
     player.prepare();
     player.seekTo(0L);
     player.play();
-    loadCoverBitmapAsync(currentMetadata.coverUrl);
     updateMediaSessionButtons();
     updateNotification();
     // 注意：先 emitPlaybackState 再 emitProgressChanged。
@@ -2002,12 +2007,15 @@ public final class PlaybackManager {
       };
 
   private void loadCoverBitmapAsync(String coverUrl) {
+    final long requestToken = coverLoadTokenCounter.incrementAndGet();
     if (coverUrl == null || coverUrl.isEmpty() || coverUrl.startsWith("blob:")) {
       coverBitmap = BitmapFactory.decodeResource(appContext.getResources(), R.mipmap.ic_launcher);
       coverArtworkBytes = encodeArtworkBytes(coverBitmap);
       updateNotification();
       return;
     }
+    coverBitmap = null;
+    coverArtworkBytes = null;
 
     artworkExecutor.execute(
         () -> {
@@ -2072,6 +2080,7 @@ public final class PlaybackManager {
           final byte[] encodedBytes = encodeArtworkBytes(resolvedBitmap);
           mainHandler.post(
               () -> {
+                if (requestToken != coverLoadTokenCounter.get()) return;
                 coverBitmap = resolvedBitmap;
                 coverArtworkBytes = encodedBytes;
                 refreshCurrentMediaItemMetadata();
