@@ -17,6 +17,9 @@
           'full-player',
           { 'fullscreen-comment': isFullscreenComment, landscape: isMobileLandscape },
         ]"
+        :data-responsive-mode="responsiveMode"
+        :data-responsive-switch="responsiveSwitchState"
+        :data-responsive-transition="responsiveTransition"
         :data-orientation-phase="orientationPhase"
         @mouseleave="playerLeave"
         @mousemove="playerMove"
@@ -118,6 +121,11 @@ import { useStatusStore, useMusicStore, useSettingStore } from "@/stores";
 import { isElectron } from "@/utils/env";
 import { PLAYER_META_HOLD_KEY, type PlayerMetaHold } from "@/composables/usePlayerMetaHold";
 import { useOrientationTransition } from "@/composables/useOrientationTransition";
+import {
+  getResponsiveModeTransition,
+  useResponsiveMode,
+  type ResponsiveModeTransition,
+} from "@/composables/useResponsiveMode";
 
 const musicStore = useMusicStore();
 const statusStore = useStatusStore();
@@ -125,6 +133,31 @@ const settingStore = useSettingStore();
 
 // 横竖屏切换状态机：phase 写到 root data-attribute，供 [data-stagger] CSS 触发
 const { phase: orientationPhase } = useOrientationTransition();
+const { responsiveMode } = useResponsiveMode();
+const responsiveSwitchState = ref<"idle" | "switching">("idle");
+const responsiveTransition = ref<ResponsiveModeTransition>("idle");
+let responsiveSwitchTimer: number | undefined;
+
+const clearResponsiveSwitchTimer = () => {
+  if (responsiveSwitchTimer) {
+    clearTimeout(responsiveSwitchTimer);
+    responsiveSwitchTimer = undefined;
+  }
+};
+
+watch(responsiveMode, (mode, oldMode) => {
+  if (!oldMode) return;
+  const transition = getResponsiveModeTransition(oldMode, mode);
+  if (transition === "idle") return;
+  clearResponsiveSwitchTimer();
+  responsiveTransition.value = transition;
+  responsiveSwitchState.value = "switching";
+  responsiveSwitchTimer = window.setTimeout(() => {
+    responsiveSwitchState.value = "idle";
+    responsiveTransition.value = "idle";
+    responsiveSwitchTimer = undefined;
+  }, 420);
+});
 
 const { isPhone, isPhonePortrait, isPad } = useDevice();
 // tap-restore 仅沉浸式 / 平板生效；其他场景保留 autohide
@@ -453,6 +486,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   stopShow();
   clearTapRestoreShieldTimer();
+  clearResponsiveSwitchTimer();
   if (isElectron) window.electron?.ipcRenderer.send("prevent-sleep", false);
 });
 </script>
@@ -602,6 +636,103 @@ onBeforeUnmount(() => {
     }
   }
 
+  // === 四模式横竖屏切换：统一入场动效，避免分支 v-if 硬切时闪烁 ===
+  &[data-responsive-switch="switching"] {
+    :deep(.full-player-mobile),
+    :deep(.full-player-mobile-landscape),
+    .player-content {
+      animation: responsive-player-switch-in 420ms cubic-bezier(0.22, 1, 0.36, 1) both;
+      will-change: opacity, filter, clip-path;
+    }
+
+    :deep(.player-menu),
+    :deep(.player-control) {
+      animation: responsive-player-chrome-in 360ms cubic-bezier(0.22, 1, 0.36, 1) both;
+      will-change: opacity, filter;
+    }
+  }
+
+  &[data-responsive-switch="switching"][data-responsive-transition="toLandscape"] {
+    :deep(.full-player-mobile),
+    :deep(.full-player-mobile-landscape),
+    .player-content {
+      animation-name: responsive-player-switch-to-landscape;
+    }
+  }
+
+  &[data-responsive-switch="switching"][data-responsive-transition="toPortrait"] {
+    :deep(.full-player-mobile),
+    :deep(.full-player-mobile-landscape),
+    .player-content {
+      animation-name: responsive-player-switch-to-portrait;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    &[data-responsive-switch="switching"] {
+      :deep(.full-player-mobile),
+      :deep(.full-player-mobile-landscape),
+      .player-content,
+      :deep(.player-menu),
+      :deep(.player-control) {
+        animation: none !important;
+      }
+    }
+  }
+
+  // === 平板横屏：桌面双栏布局 + 横屏歌词槽位约束 ===
+  &[data-responsive-mode="padLandscape"] {
+    --pad-landscape-lyric-padding-x: clamp(20px, 4vw, 56px);
+
+    .player-content {
+      min-height: 0;
+
+      .content-right {
+        min-height: 0;
+        overflow: hidden;
+
+        :deep(.player-lyric),
+        :deep(.lyric),
+        :deep(.am-lyric) {
+          height: 100%;
+          min-height: 0;
+        }
+
+        :deep(.lyric-scroll-container) {
+          padding-left: var(--pad-landscape-lyric-padding-x);
+          // 默认保留右侧歌词菜单空间，低高度横屏再收紧并隐藏菜单
+          padding-right: max(var(--pad-landscape-lyric-padding-x), 80px);
+
+          .placeholder:first-child {
+            // 原 300px 顶占位在平板横屏高度较小时会把歌词挤出可视区
+            height: clamp(80px, 16vh, 140px) !important;
+          }
+        }
+
+        :deep(.am-lyric) {
+          padding-left: var(--pad-landscape-lyric-padding-x);
+          padding-right: var(--pad-landscape-lyric-padding-x);
+        }
+      }
+    }
+
+    @media (max-height: 720px) {
+      .player-content {
+        .content-right {
+          :deep(.lyric-scroll-container),
+          :deep(.am-lyric) {
+            padding-left: var(--pad-landscape-lyric-padding-x) !important;
+            padding-right: var(--pad-landscape-lyric-padding-x) !important;
+          }
+
+          :deep(.lyric-menu) {
+            display: none !important;
+          }
+        }
+      }
+    }
+  }
+
   // === 手机横屏：紧凑顶/底栏 ===
   &.landscape {
     :deep(.player-menu) {
@@ -645,6 +776,68 @@ onBeforeUnmount(() => {
         }
       }
     }
+  }
+}
+
+@keyframes responsive-player-switch-in {
+  0% {
+    opacity: 0;
+    filter: blur(10px);
+    clip-path: inset(4% 4% 4% 4% round 24px);
+  }
+  55% {
+    opacity: 0.76;
+    filter: blur(3px);
+  }
+  100% {
+    opacity: 1;
+    filter: blur(0);
+    clip-path: inset(0 0 0 0 round 0);
+  }
+}
+
+@keyframes responsive-player-switch-to-landscape {
+  0% {
+    opacity: 0;
+    filter: blur(10px);
+    clip-path: inset(0 8% 0 8% round 24px);
+  }
+  55% {
+    opacity: 0.78;
+    filter: blur(3px);
+  }
+  100% {
+    opacity: 1;
+    filter: blur(0);
+    clip-path: inset(0 0 0 0 round 0);
+  }
+}
+
+@keyframes responsive-player-switch-to-portrait {
+  0% {
+    opacity: 0;
+    filter: blur(10px);
+    clip-path: inset(8% 0 8% 0 round 24px);
+  }
+  55% {
+    opacity: 0.78;
+    filter: blur(3px);
+  }
+  100% {
+    opacity: 1;
+    filter: blur(0);
+    clip-path: inset(0 0 0 0 round 0);
+  }
+}
+
+@keyframes responsive-player-chrome-in {
+  0% {
+    opacity: 0;
+    filter: blur(8px);
+  }
+  100% {
+    opacity: 1;
+    filter: blur(0);
   }
 }
 </style>

@@ -2,6 +2,8 @@ import { computed, ref } from "vue";
 
 // Material Design 3 expanded 断点（dp/CSS px），覆盖多数 7~10 寸 Android 平板
 export const ANDROID_PAD_BREAKPOINT = 600;
+// 平板双栏 UI 需要足够的当前窗口宽度；小窗和竖屏回退手机式布局
+export const ANDROID_PAD_LAYOUT_MIN_WIDTH = 900;
 
 // 模块级单例：所有 useDevice() 共用同一份 viewport 状态与监听器，避免重复注册造成内存泄漏
 const hasWindow = typeof window !== "undefined";
@@ -65,6 +67,19 @@ const shortestSide = computed(() =>
 );
 const isLandscape = computed(() => effectiveWidth.value > effectiveHeight.value);
 
+export const getIsPadLayout = ({
+  isPadDevice,
+  effectiveWidth,
+  effectiveHeight,
+}: {
+  isPadDevice: boolean;
+  effectiveWidth: number;
+  effectiveHeight: number;
+}) =>
+  isPadDevice &&
+  effectiveWidth > effectiveHeight &&
+  effectiveWidth >= ANDROID_PAD_LAYOUT_MIN_WIDTH;
+
 // === 用户手动覆盖：防止 UA / 短边识别失败时无法切换设备形态 ===
 // 由 App.vue 从 settingStore.androidDeviceModeOverride 同步到此 ref
 export type DeviceModeOverride = "auto" | "phone" | "pad";
@@ -82,7 +97,13 @@ const isPhoneDevice = computed(() => !isPadDevice.value);
 // === UI 布局模式（随旋转切换）===
 // 仅平板横屏走平板 UI；平板竖屏 / 任意朝向手机 都走手机 UI
 // 平板竖屏单列窄宽不适合双栏侧导航，统一回退手机布局，体验一致
-const isPad = computed(() => isPadDevice.value && isLandscape.value);
+const isPad = computed(() =>
+  getIsPadLayout({
+    isPadDevice: isPadDevice.value,
+    effectiveWidth: effectiveWidth.value,
+    effectiveHeight: effectiveHeight.value,
+  }),
+);
 const isPhone = computed(() => !isPad.value);
 
 // 细化语义（基于布局模式，保持与 isPad/isPhone 一致）

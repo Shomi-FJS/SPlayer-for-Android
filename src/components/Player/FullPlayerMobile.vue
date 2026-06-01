@@ -6,7 +6,7 @@ let savedPageType: MobilePageType = "info";
 <template>
   <div
     ref="mobileStart"
-    :class="['full-player-mobile', { 'pad-portrait': isPadDevice }]"
+    class="full-player-mobile"
     :style="{
       '--lyric-h-offset': lyricHeaderHorizontalPadding,
       '--pad-portrait-lrc-size': padPortraitLyricSize,
