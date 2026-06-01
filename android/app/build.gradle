@@ -6,6 +6,16 @@ if (keystorePropertiesFile.exists()) {
     keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
 }
 
+def getVersionCodeOverride = {
+    def raw = project.findProperty('canaryVersionCode')
+    return raw == null || raw.toString().trim().isEmpty() ? 30005 : raw.toString().trim().toInteger()
+}
+
+def getVersionNameOverride = {
+    def raw = project.findProperty('canaryVersionName')
+    return raw == null || raw.toString().trim().isEmpty() ? "3.0.0-rc.4" : raw.toString().trim()
+}
+
 android {
     namespace = "top.imsyy.splayer.android"
     compileSdk = rootProject.ext.compileSdkVersion
@@ -23,8 +33,8 @@ android {
         applicationId "top.imsyy.splayer.android"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 30005
-        versionName "3.0.0-rc.4"
+        versionCode getVersionCodeOverride()
+        versionName getVersionNameOverride()
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.

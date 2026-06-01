@@ -1,0 +1,301 @@
+name: Android Canary
+
+on:
+  push:
+    branches:
+      - dev
+      - auto-actions
+    paths-ignore:
+      - "update/canary-latest.json"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-canary
+  cancel-in-progress: true
+
+jobs:
+  build-and-publish-canary:
+    runs-on: ubuntu-latest
+    env:
+      NODE_VERSION: "24"
+      JAVA_VERSION: "21"
+      PNPM_VERSION: "10.28.1"
+      ANDROID_API_LEVEL: "36"
+      ANDROID_BUILD_TOOLS: "36.0.0"
+      ANDROID_NDK_VERSION: "27.0.12077973"
+      ANDROID_CMAKE_VERSION: "3.22.1"
+      APPLICATION_ID: "top.imsyy.splayer.android"
+      BASE_VERSION_CODE: "30005"
+      CANARY_TAG: "canary-latest"
+      CANARY_RELEASE_NAME: "SPlayer for Android Canary Latest"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: gradle
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android packages
+        shell: bash
+        run: |
+          set +o pipefail
+          yes | sdkmanager --licenses > /dev/null
+          set -o pipefail
+          sdkmanager --install \
+            "platform-tools" \
+            "platforms;android-${ANDROID_API_LEVEL}" \
+            "build-tools;${ANDROID_BUILD_TOOLS}" \
+            "ndk;${ANDROID_NDK_VERSION}" \
+            "cmake;${ANDROID_CMAKE_VERSION}"
+
+          echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=${ANDROID_SDK_ROOT}/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Prepare Android local.properties
+        shell: bash
+        run: |
+          cat > android/local.properties <<EOF
+          sdk.dir=${ANDROID_SDK_ROOT}
+          ndk.dir=${ANDROID_SDK_ROOT}/ndk/${ANDROID_NDK_VERSION}
+          EOF
+
+      - name: Prepare env file
+        shell: bash
+        run: |
+          if [ ! -f .env ] && [ -f .env.example ]; then
+            cp .env.example .env
+          fi
+
+      - name: Validate signing secrets
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          test -n "$KEYSTORE_BASE64" || { echo "Missing secret: ANDROID_KEYSTORE_BASE64"; exit 1; }
+          test -n "$KEYSTORE_PASSWORD" || { echo "Missing secret: ANDROID_KEYSTORE_PASSWORD"; exit 1; }
+          test -n "$KEY_ALIAS" || { echo "Missing secret: ANDROID_KEY_ALIAS"; exit 1; }
+          test -n "$KEY_PASSWORD" || { echo "Missing secret: ANDROID_KEY_PASSWORD"; exit 1; }
+
+      - name: Prepare Android signing files
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          mkdir -p android/app
+          echo "$KEYSTORE_BASE64" | base64 --decode > android/app/release.keystore
+          cat > android/key.properties <<EOF
+          storeFile=release.keystore
+          storePassword=${KEYSTORE_PASSWORD}
+          keyAlias=${KEY_ALIAS}
+          keyPassword=${KEY_PASSWORD}
+          EOF
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Prepare canary version
+        shell: bash
+        run: |
+          BASE_VERSION_NAME="$(node -p "require('./package.json').version")"
+          SHORT_SHA="$(git rev-parse --short=7 HEAD)"
+          CANARY_VERSION_CODE=$((BASE_VERSION_CODE + GITHUB_RUN_NUMBER))
+          CANARY_VERSION_NAME="${BASE_VERSION_NAME}-canary.${GITHUB_RUN_NUMBER}+${SHORT_SHA}"
+
+          echo "BASE_VERSION_NAME=${BASE_VERSION_NAME}" >> "$GITHUB_ENV"
+          echo "SHORT_SHA=${SHORT_SHA}" >> "$GITHUB_ENV"
+          echo "CANARY_VERSION_CODE=${CANARY_VERSION_CODE}" >> "$GITHUB_ENV"
+          echo "CANARY_VERSION_NAME=${CANARY_VERSION_NAME}" >> "$GITHUB_ENV"
+
+      - name: Build web assets
+        run: pnpm build:web
+
+      - name: Sync Capacitor Android project
+        run: pnpm exec cap sync android
+
+      - name: Build embedded Android API bundle
+        run: pnpm build:android:node
+
+      - name: Prepare embedded Android assets
+        run: pnpm prepare:android:embedded
+
+      - name: Build signed release APK
+        shell: bash
+        run: |
+          chmod +x android/gradlew
+          cd android
+          ./gradlew assembleRelease \
+            -PcanaryVersionCode="${CANARY_VERSION_CODE}" \
+            -PcanaryVersionName="${CANARY_VERSION_NAME}"
+
+      - name: Prepare canary assets and manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK_DIR="android/app/build/outputs/apk/release"
+          RELEASE_DIR="release"
+          mkdir -p "${RELEASE_DIR}" update
+
+          ABIS=(arm64-v8a armeabi-v7a x86 x86_64)
+          for abi in "${ABIS[@]}"; do
+            src="${APK_DIR}/app-${abi}-release.apk"
+            if [ ! -f "${src}" ]; then
+              echo "::error::Expected signed release APK not found: ${src}"
+              ls -la "${APK_DIR}" || true
+              exit 1
+            fi
+
+            dst="${RELEASE_DIR}/SPlayer-canary-${abi}.apk"
+            cp "${src}" "${dst}"
+            sha256sum "${dst}" > "${dst}.sha256"
+          done
+
+          cat > "${RELEASE_DIR}/canary-release-notes.md" <<EOF
+          This is an automatically generated Canary build.
+
+          It may be unstable and is not a stable Release.
+
+          Build details:
+          - Version: ${CANARY_VERSION_NAME}
+          - Version code: ${CANARY_VERSION_CODE}
+          - Commit: ${GITHUB_SHA}
+          - Branch: ${GITHUB_REF_NAME}
+
+          Download the APK that matches your device ABI.
+          EOF
+
+          node --input-type=module <<'NODE'
+          import fs from "node:fs";
+          import path from "node:path";
+
+          const abis = ["arm64-v8a", "armeabi-v7a", "x86", "x86_64"];
+          const tag = process.env.CANARY_TAG;
+          const repo = process.env.GITHUB_REPOSITORY;
+          const releaseUrl = `https://github.com/${repo}/releases/tag/${tag}`;
+          const downloads = {};
+
+          for (const abi of abis) {
+            const apkName = `SPlayer-canary-${abi}.apk`;
+            const shaFile = path.join("release", `${apkName}.sha256`);
+            const sha256 = fs.readFileSync(shaFile, "utf8").trim().split(/\s+/)[0];
+            downloads[abi] = {
+              apkName,
+              url: `https://github.com/${repo}/releases/download/${tag}/${apkName}`,
+              sha256,
+            };
+          }
+
+          const manifest = {
+            applicationId: process.env.APPLICATION_ID,
+            channel: "canary",
+            versionCode: Number(process.env.CANARY_VERSION_CODE),
+            versionName: process.env.CANARY_VERSION_NAME,
+            baseVersionName: process.env.BASE_VERSION_NAME,
+            commit: process.env.GITHUB_SHA,
+            shortCommit: process.env.SHORT_SHA,
+            branch: process.env.GITHUB_REF_NAME,
+            buildNumber: Number(process.env.GITHUB_RUN_NUMBER),
+            builtAt: new Date().toISOString(),
+            releaseTag: tag,
+            releaseUrl,
+            changelog: `Canary build from commit ${process.env.SHORT_SHA}`,
+            releaseNote: "This is an automatically generated Canary build. It may be unstable.",
+            canRollbackByInstall: false,
+            rollbackNotice:
+              "如果需要从 Canary 退回 Release，请先在设置中备份配置文件，然后卸载当前 App，再安装稳定版 Release，最后恢复配置。",
+            downloads,
+          };
+
+          fs.mkdirSync("update", { recursive: true });
+          fs.writeFileSync("update/canary-latest.json", `${JSON.stringify(manifest, null, 2)}\n`);
+          NODE
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SPlayer-canary-${{ github.run_number }}-${{ env.SHORT_SHA }}
+          path: |
+            release/*.apk
+            release/*.sha256
+            update/canary-latest.json
+
+      - name: Publish rolling canary prerelease
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          git tag -f "${CANARY_TAG}" "${GITHUB_SHA}"
+          git push origin "refs/tags/${CANARY_TAG}" --force
+
+          if gh release view "${CANARY_TAG}" >/dev/null 2>&1; then
+            gh release edit "${CANARY_TAG}" \
+              --title "${CANARY_RELEASE_NAME}" \
+              --notes-file "release/canary-release-notes.md" \
+              --prerelease \
+              --target "${GITHUB_SHA}"
+          else
+            gh release create "${CANARY_TAG}" \
+              --target "${GITHUB_SHA}" \
+              --title "${CANARY_RELEASE_NAME}" \
+              --notes-file "release/canary-release-notes.md" \
+              --prerelease
+          fi
+
+          gh release view "${CANARY_TAG}" --json assets --jq '.assets[].name' | while read -r asset; do
+            case "${asset}" in
+              SPlayer-canary-*.apk|SPlayer-canary-*.apk.sha256)
+                gh release delete-asset "${CANARY_TAG}" "${asset}" -y
+                ;;
+            esac
+          done
+
+          gh release upload "${CANARY_TAG}" release/*.apk release/*.sha256 --clobber
+
+      - name: Commit canary manifest
+        if: ${{ github.ref == 'refs/heads/dev' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add update/canary-latest.json
+
+          if git diff --cached --quiet; then
+            echo "canary-latest.json unchanged"
+            exit 0
+          fi
+
+          git commit -m "chore: update canary manifest [skip ci]"
+          git push origin HEAD:dev
