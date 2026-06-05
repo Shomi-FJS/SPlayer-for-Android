@@ -43,6 +43,8 @@ declare module 'vue' {
     FullscreenPlayerManager: typeof import('./src/components/Modal/Setting/FullscreenPlayerManager.vue')['default']
     HomePageSectionManager: typeof import('./src/components/Modal/Setting/HomePageSectionManager.vue')['default']
     JumpArtist: typeof import('./src/components/Modal/JumpArtist.vue')['default']
+    LiquidGlassFilter: typeof import('./src/components/UI/LiquidGlassFilter.vue')['default']
+    LiquidGlassNavBar: typeof import('./src/components/UI/LiquidGlassNavBar.vue')['default']
     ListComment: typeof import('./src/components/List/ListComment.vue')['default']
     ListDetail: typeof import('./src/components/List/ListDetail.vue')['default']
     LocalLyricDirectories: typeof import('./src/components/Setting/components/LocalLyricDirectories.vue')['default']

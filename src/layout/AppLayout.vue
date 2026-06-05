@@ -131,22 +131,16 @@
     <Transition name="fade">
       <nav
         v-if="isPhone && !statusStore.showFullPlayer"
-        ref="navRef"
         class="mobile-bottom-nav"
         :style="mobileNavBg"
       >
-        <div class="mobile-bottom-nav__indicator" :style="indicatorStyle" />
-        <button
-          v-for="(item, idx) in phoneNavItems"
-          :key="item.key"
-          :ref="(el) => setItemRef(el, idx)"
-          :class="['mobile-bottom-nav__item', { active: activePhoneNav === item.key }]"
-          type="button"
-          @click="navigatePhoneNav(item.routeName)"
-        >
-          <SvgIcon :name="item.icon" :size="17" />
-          <span>{{ item.label }}</span>
-        </button>
+        <LiquidGlassNavBar
+          :model-value="activePhoneNav"
+          :items="liquidGlassNavItems"
+          :active-color="'var(--primary-hex)'"
+          :always-show-glass="statusStore.isCustomBackground"
+          @update:model-value="onLiquidGlassNavChange"
+        />
       </nav>
     </Transition>
 
@@ -169,6 +163,7 @@ import { useInit } from "@/composables/useInit";
 import MainPlayer from "@/components/Player/MainPlayer.vue";
 import FullPlayer from "@/components/Player/FullPlayer.vue";
 import PlayerProvider from "@/components/Global/PlayerProvider.vue";
+import LiquidGlassNavBar from "@/components/UI/LiquidGlassNavBar.vue";
 
 // 播放队列（n-drawer）首次打开才挂载，配合 defineAsyncComponent 异步拉取 chunk；
 // 挂载后保持常驻，避免每次开关重置 n-drawer 入场动画。
@@ -200,6 +195,19 @@ const phoneNavItems = [
   { key: "history", label: "最近", icon: "History", routeName: "history" },
 ] as const;
 
+// 液态玻璃导航项（适配 LiquidGlassNavBar 的接口）
+const liquidGlassNavItems = phoneNavItems.map((item) => ({
+  id: item.key,
+  label: item.label,
+  icon: item.icon,
+}));
+
+// 液态玻璃导航切换
+const onLiquidGlassNavChange = (id: string) => {
+  const item = phoneNavItems.find((it) => it.key === id);
+  if (item) navigatePhoneNav(item.routeName);
+};
+
 const activePhoneNav = computed(() => {
   const routeName = String(route.name || "");
 
@@ -210,35 +218,6 @@ const activePhoneNav = computed(() => {
 
   return "home";
 });
-
-// 底栏滑动指示器：跟随激活的 nav item，动画平滑到位
-const navRef = ref<HTMLElement | null>(null);
-const itemRefs = ref<(HTMLElement | null)[]>([]);
-const indicatorStyle = ref<Record<string, string>>({});
-const setItemRef = (el: unknown, idx: number) => {
-  itemRefs.value[idx] = el instanceof HTMLElement ? el : null;
-};
-const updateIndicator = () => {
-  const idx = phoneNavItems.findIndex((it) => it.key === activePhoneNav.value);
-  const el = itemRefs.value[idx];
-  if (!el) {
-    indicatorStyle.value = { opacity: "0" };
-    return;
-  }
-  indicatorStyle.value = {
-    transform: `translate3d(${el.offsetLeft}px, ${el.offsetTop}px, 0)`,
-    width: `${el.offsetWidth}px`,
-    height: `${el.offsetHeight}px`,
-    opacity: "1",
-  };
-};
-watch(activePhoneNav, () => nextTick(updateIndicator));
-watch(
-  () => isPhone.value && !statusStore.showFullPlayer,
-  (visible) => {
-    if (visible) nextTick(updateIndicator);
-  },
-);
 
 const contentRef = ref<HTMLElement | null>(null);
 const { height: contentHeight } = useElementSize(contentRef);
@@ -291,9 +270,8 @@ const mobileNavBg = computed(() => {
   if (!statusStore.isCustomBackground) return {};
   const { nav } = imageLayoutVars.value;
   return {
-    backgroundColor: `rgba(var(--surface-container), ${nav})`,
-    backdropFilter: frostedBlur.value,
-    WebkitBackdropFilter: frostedBlur.value,
+    "--mobile-nav-background": `rgba(var(--surface-container), ${nav})`,
+    "--mobile-nav-backdrop-filter": `${frostedBlur.value} saturate(1.35)`,
   };
 });
 
@@ -370,9 +348,7 @@ const orientationMql = window.matchMedia("(orientation: portrait)");
 onMounted(() => {
   loadBackgroundImage();
   window.addEventListener("orientationchange", handleOrientationChange);
-  window.addEventListener("resize", updateIndicator);
   // 首次挂载也尝试一次（nav 可能尚未渲染，wait nextTick 更稳）
-  nextTick(updateIndicator);
   orientationMql.addEventListener?.("change", handleOrientationChange);
   if (!isElectron) {
     window.addEventListener("beforeunload", (event) => {
@@ -385,7 +361,6 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   window.removeEventListener("orientationchange", handleOrientationChange);
-  window.removeEventListener("resize", updateIndicator);
   orientationMql.removeEventListener?.("change", handleOrientationChange);
 });
 </script>
@@ -396,7 +371,8 @@ onBeforeUnmount(() => {
   --safe-area-bottom: max(env(safe-area-inset-bottom), var(--android-fullscreen-safe-bottom, 0px));
   --app-header-height: calc(72px + var(--safe-area-top));
   --phone-nav-height: 56px;
-  --phone-nav-total-height: calc(var(--phone-nav-height) + var(--safe-area-bottom));
+  --phone-nav-float-gap: 8px;
+  --phone-nav-total-height: calc(var(--phone-nav-height) + var(--phone-nav-float-gap) * 2 + var(--safe-area-bottom));
   --phone-player-height: 64px;
   --phone-player-gap: 8px;
   --phone-content-gap: 12px;
@@ -530,81 +506,13 @@ onBeforeUnmount(() => {
 
 .mobile-bottom-nav {
   position: fixed;
-  left: 0;
-  right: 0;
-  bottom: 0;
+  left: 12px;
+  right: 12px;
+  bottom: calc(8px + var(--safe-area-bottom));
   z-index: 9;
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 4px;
-  padding: 6px 8px calc(6px + var(--safe-area-bottom));
-  background-color: var(--surface-container-hex);
-  box-shadow: 0 -1px 8px rgba(0, 0, 0, 0.06);
+  display: flex;
+  align-items: center;
+  justify-content: center;
   transition: opacity 0.3s var(--n-bezier);
-
-  &__indicator {
-    position: absolute;
-    top: 0;
-    left: 0;
-    border-radius: 10px;
-    background: rgba(var(--primary), 0.12);
-    transition:
-      transform 0.3s var(--n-bezier),
-      width 0.3s var(--n-bezier),
-      height 0.3s var(--n-bezier),
-      opacity 0.2s var(--n-bezier);
-    pointer-events: none;
-    z-index: 0;
-    will-change: transform, width;
-  }
-
-  &__item {
-    position: relative;
-    z-index: 1;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 2px;
-    min-height: 38px;
-    padding: 2px 0;
-    border: 0;
-    border-radius: 10px;
-    background: transparent;
-    color: var(--n-text-color-2);
-    transition:
-      color 0.3s var(--n-bezier),
-      transform 0.15s var(--n-bezier);
-
-    .n-icon {
-      font-size: 17px;
-    }
-
-    span {
-      font-size: 10px;
-      line-height: 1;
-      text-align: center;
-      word-break: keep-all;
-    }
-
-    &.active {
-      color: var(--primary-hex);
-    }
-
-    &:active {
-      transform: scale(0.94);
-    }
-  }
-
-  @media (max-width: 360px) {
-    &__item {
-      .n-icon {
-        font-size: 16px;
-      }
-      span {
-        font-size: 9px;
-      }
-    }
-  }
 }
 </style>
